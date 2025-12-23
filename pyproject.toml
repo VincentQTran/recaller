@@ -1,0 +1,65 @@
+[project]
+name = "recaller"
+version = "0.1.0"
+description = "Notion-Anki integration tool with semantic deduplication and AI-generated flashcards"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Notion API
+    "notion-client>=2.0.0",
+
+    # Embeddings
+    "sentence-transformers>=2.2.0",
+    "numpy>=1.24.0",
+
+    # Database
+    "sqlalchemy>=2.0.0",
+
+    # LLM (Gemini)
+    "google-generativeai>=0.8.0",
+
+    # Anki (AnkiConnect HTTP calls)
+    "requests>=2.31.0",
+
+    # CLI & Config
+    "typer>=0.9.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+
+    # Utilities
+    "tenacity>=8.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "mypy>=1.5.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+recaller = "recaller.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/recaller"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
