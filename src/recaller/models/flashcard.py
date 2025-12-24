@@ -35,7 +35,7 @@ class Flashcard:
 
     # Anki metadata
     tags: list[str] = field(default_factory=list)
-    deck_name: str = "Recaller::Weekly"
+    deck_name: str = ""  # Set dynamically to current date (MM-DD-YYYY)
 
     # Local database metadata
     id: Optional[int] = None

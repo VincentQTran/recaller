@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from recaller.database.schema import (
+    EmbeddingRecord,
     ExportBatchRecord,
     FlashcardRecord,
     MergeHistoryRecord,
@@ -241,6 +242,120 @@ class Repository:
                 record.status = status
                 record.error_message = error_message
                 session.commit()
+
+    # ==================== Embedding Operations ====================
+
+    def upsert_embedding(
+        self, notion_page_id: str, title: str, embedding: np.ndarray
+    ) -> bool:
+        """Insert or update an embedding record.
+
+        If the notion_page_id exists, updates only if title changed.
+
+        Args:
+            notion_page_id: Notion page ID from the Notes Database
+            title: Note title
+            embedding: 384-dim numpy array
+
+        Returns:
+            True if record was inserted/updated, False if unchanged
+        """
+        title_hash = self._compute_title_hash(title)
+
+        with self._get_session() as session:
+            stmt = select(EmbeddingRecord).where(
+                EmbeddingRecord.notion_page_id == notion_page_id
+            )
+            existing = session.scalars(stmt).first()
+
+            if existing:
+                # Only update if title changed
+                if existing.title_hash != title_hash:
+                    existing.title = title
+                    existing.title_hash = title_hash
+                    existing.embedding = self._serialize_embedding(embedding)
+                    existing.updated_at = datetime.utcnow()
+                    session.commit()
+                    return True
+                return False
+            else:
+                record = EmbeddingRecord(
+                    notion_page_id=notion_page_id,
+                    title=title,
+                    title_hash=title_hash,
+                    embedding=self._serialize_embedding(embedding),
+                )
+                session.add(record)
+                session.commit()
+                return True
+
+    def get_embedding_by_notion_id(
+        self, notion_page_id: str
+    ) -> Optional[tuple[str, np.ndarray]]:
+        """Get title and embedding for a note by Notion page ID.
+
+        Args:
+            notion_page_id: Notion page ID
+
+        Returns:
+            Tuple of (title, embedding) or None if not found
+        """
+        with self._get_session() as session:
+            stmt = select(EmbeddingRecord).where(
+                EmbeddingRecord.notion_page_id == notion_page_id
+            )
+            record = session.scalars(stmt).first()
+            if record:
+                return (record.title, self._deserialize_embedding(record.embedding))
+            return None
+
+    def get_all_embeddings(self) -> list[tuple[str, str, np.ndarray]]:
+        """Get all stored embeddings.
+
+        Returns:
+            List of (notion_page_id, title, embedding) tuples
+        """
+        with self._get_session() as session:
+            stmt = select(EmbeddingRecord)
+            records = session.scalars(stmt).all()
+            return [
+                (r.notion_page_id, r.title, self._deserialize_embedding(r.embedding))
+                for r in records
+            ]
+
+    def get_embedding_count(self) -> int:
+        """Get count of stored embeddings."""
+        with self._get_session() as session:
+            return session.query(EmbeddingRecord).count()
+
+    def get_embeddings_by_notion_ids(
+        self, notion_page_ids: list[str]
+    ) -> dict[str, tuple[str, np.ndarray]]:
+        """Get embeddings for multiple notes by their Notion page IDs.
+
+        Args:
+            notion_page_ids: List of Notion page IDs
+
+        Returns:
+            Dict mapping notion_page_id to (title, embedding) tuple
+        """
+        if not notion_page_ids:
+            return {}
+
+        with self._get_session() as session:
+            stmt = select(EmbeddingRecord).where(
+                EmbeddingRecord.notion_page_id.in_(notion_page_ids)
+            )
+            records = session.scalars(stmt).all()
+            return {
+                r.notion_page_id: (r.title, self._deserialize_embedding(r.embedding))
+                for r in records
+            }
+
+    @staticmethod
+    def _compute_title_hash(title: str) -> str:
+        """Compute SHA256 hash of title for change detection."""
+        return hashlib.sha256(title.encode()).hexdigest()
 
     # ==================== Statistics ====================
 

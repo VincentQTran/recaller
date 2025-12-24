@@ -5,9 +5,6 @@ description = "Notion-Anki integration tool with semantic deduplication and AI-g
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    # Notion API
-    "notion-client>=2.0.0",
-
     # Embeddings
     "sentence-transformers>=2.2.0",
     "numpy>=1.24.0",

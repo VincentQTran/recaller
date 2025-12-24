@@ -43,7 +43,6 @@ def flashcard_generator(mock_ollama):
         ollama_service=mock_ollama,
         cards_per_note_min=1,
         cards_per_note_max=3,
-        deck_name="Test::Deck",
     )
 
 
@@ -56,12 +55,10 @@ class TestFlashcardGeneratorInit:
             ollama_service=mock_ollama,
             cards_per_note_min=2,
             cards_per_note_max=5,
-            deck_name="Custom::Deck",
         )
 
         assert gen.cards_min == 2
         assert gen.cards_max == 5
-        assert gen.deck_name == "Custom::Deck"
 
     def test_init_default_values(self, mock_ollama):
         """Test default values for optional parameters."""
@@ -69,7 +66,6 @@ class TestFlashcardGeneratorInit:
 
         assert gen.cards_min == 1
         assert gen.cards_max == 3
-        assert gen.deck_name == "Recaller::Weekly"
 
 
 class TestGenerateFlashcards:
@@ -116,7 +112,9 @@ class TestGenerateFlashcards:
         result = flashcard_generator.generate_flashcards(note)
 
         assert result[0].note_id == 42
-        assert result[0].deck_name == "Test::Deck"
+        # Deck name is now based on current date (Recaller::MM-DD-YYYY format)
+        import re
+        assert re.match(r"Recaller::\d{2}-\d{2}-\d{4}", result[0].deck_name)
 
     def test_generate_flashcards_with_code_block(self, flashcard_generator, mock_ollama):
         """Test parsing JSON from code block."""

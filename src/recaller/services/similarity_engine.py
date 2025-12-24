@@ -120,6 +120,63 @@ class SimilarityEngine:
 
         return pairs
 
+    def find_similar_pairs_between(
+        self,
+        notes_a: list[Note],
+        notes_b: list[Note],
+        same_category_only: bool = True,
+    ) -> list[SimilarityPair]:
+        """Find pairs of similar notes between two separate lists.
+
+        Args:
+            notes_a: First list of notes (e.g., current notes)
+            notes_b: Second list of notes (e.g., database notes)
+            same_category_only: If True, only compare notes with the same category
+
+        Returns:
+            List of SimilarityPair objects, sorted by similarity (descending)
+        """
+        # Filter notes that have embeddings
+        notes_a_with_embeddings = [n for n in notes_a if n.embedding is not None]
+        notes_b_with_embeddings = [n for n in notes_b if n.embedding is not None]
+
+        if not notes_a_with_embeddings or not notes_b_with_embeddings:
+            return []
+
+        pairs: list[SimilarityPair] = []
+
+        # Compare each note in list A with each note in list B
+        for note_a in notes_a_with_embeddings:
+            for note_b in notes_b_with_embeddings:
+                # Skip if same note
+                if note_a.notion_page_id == note_b.notion_page_id:
+                    continue
+
+                # Skip if categories don't match (when same_category_only is True)
+                if same_category_only:
+                    if not note_a.category or not note_b.category:
+                        continue
+                    if note_a.category.lower() != note_b.category.lower():
+                        continue
+
+                # Compute similarity
+                similarity = self.cosine_similarity(
+                    note_a.embedding,  # type: ignore
+                    note_b.embedding,  # type: ignore
+                )
+
+                if similarity >= self.threshold:
+                    pairs.append(SimilarityPair(
+                        note_a=note_a,
+                        note_b=note_b,
+                        similarity=similarity,
+                    ))
+
+        # Sort by similarity (highest first)
+        pairs.sort(key=lambda p: p.similarity, reverse=True)
+
+        return pairs
+
     def find_similar_to_note(
         self,
         target_note: Note,

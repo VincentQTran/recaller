@@ -60,10 +60,6 @@ class Settings(BaseSettings):
     )
 
     # Anki
-    anki_deck_name: str = Field(
-        default="Recaller::Weekly",
-        description="Name of the Anki deck for flashcards",
-    )
     ankiconnect_url: str = Field(
         default="http://localhost:8765",
         description="URL for AnkiConnect API",

@@ -2,6 +2,7 @@
 
 import json
 import re
+from datetime import datetime
 from typing import Any
 
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -9,6 +10,11 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from recaller.models.flashcard import Flashcard, FlashcardType
 from recaller.models.note import Note
 from recaller.services.ollama_service import OllamaService
+
+
+def get_deck_name() -> str:
+    """Get deck name formatted as Recaller::MM-DD-YYYY."""
+    return f"Recaller::{datetime.now().strftime('%m-%d-%Y')}"
 
 
 class FlashcardGenerator:
@@ -22,7 +28,6 @@ class FlashcardGenerator:
         ollama_service: OllamaService,
         cards_per_note_min: int = 1,
         cards_per_note_max: int = 3,
-        deck_name: str = "Recaller::Weekly",
     ):
         """Initialize the flashcard generator.
 
@@ -30,12 +35,10 @@ class FlashcardGenerator:
             ollama_service: OllamaService instance for LLM calls
             cards_per_note_min: Minimum flashcards to generate per note
             cards_per_note_max: Maximum flashcards to generate per note
-            deck_name: Default Anki deck name for cards
         """
         self.llm = ollama_service
         self.cards_min = cards_per_note_min
         self.cards_max = cards_per_note_max
-        self.deck_name = deck_name
 
     @retry(
         stop=stop_after_attempt(3),
@@ -197,7 +200,7 @@ Generate the flashcards now:"""
                 card_type=card_type,
                 note_id=note.id or 0,
                 tags=tags,
-                deck_name=self.deck_name,
+                deck_name=get_deck_name(),
             )
             flashcards.append(flashcard)
 

@@ -48,7 +48,6 @@ def sync(
     console.print(f"  Notion page: {settings.notion_page_id}")
     console.print(f"  Ollama model: {settings.ollama_model}")
     console.print(f"  Similarity threshold: {settings.similarity_threshold}")
-    console.print(f"  Anki deck: {settings.anki_deck_name}")
     console.print()
 
     # Step 1: Fetch notes from Notion
@@ -85,30 +84,85 @@ def sync(
 
     console.print(f"  Generated embeddings for [green]{len(notes)}[/green] notes\n")
 
-    # Step 3: Find similar notes
+    # Step 3: Find similar notes (including database notes)
     console.print("[bold]Step 3:[/bold] Finding similar notes...")
     from recaller.services.similarity_engine import SimilarityEngine
 
+    # Initialize repository for cached embeddings
+    repo = get_repository(settings)
+
+    # Fetch existing notes from database for comparison
+    console.print("  Fetching existing notes from database...")
+    database_notes = notion.fetch_database_notes()
+    console.print(f"  Found [cyan]{len(database_notes)}[/cyan] notes in database")
+
+    # Load cached embeddings for database notes (instead of regenerating)
+    if database_notes:
+        notion_ids = [n.notion_page_id for n in database_notes]
+        cached_embeddings = repo.get_embeddings_by_notion_ids(notion_ids)
+
+        cached_count = 0
+        generated_count = 0
+
+        with console.status("[yellow]Loading embeddings for database notes...[/yellow]"):
+            for db_note in database_notes:
+                if db_note.notion_page_id in cached_embeddings:
+                    # Use cached embedding
+                    _, db_note.embedding = cached_embeddings[db_note.notion_page_id]
+                    cached_count += 1
+                else:
+                    # Generate embedding for notes not in cache
+                    db_note.embedding = embedding_service.generate_note_embedding(db_note)
+                    generated_count += 1
+
+        console.print(f"  Embeddings: [green]{cached_count}[/green] cached, [yellow]{generated_count}[/yellow] generated")
+
     similarity_engine = SimilarityEngine(threshold=settings.similarity_threshold)
+
+    # Find similar pairs among current notes
     similar_pairs = similarity_engine.find_similar_pairs(
         notes, same_category_only=True
     )
 
-    if not similar_pairs:
-        console.print("  [green]No similar notes found[/green]\n")
-    else:
-        console.print(
-            f"  Found [yellow]{len(similar_pairs)}[/yellow] similar note pairs\n"
+    # Find similar pairs between current notes and database notes
+    database_similar_pairs = []
+    if database_notes:
+        database_similar_pairs = similarity_engine.find_similar_pairs_between(
+            notes, database_notes, same_category_only=True
         )
 
-        # Display similar pairs
-        console.print("[bold]Proposed merges:[/bold]")
-        for i, pair in enumerate(similar_pairs, 1):
-            console.print(f"\n[cyan]─── Pair {i} ───[/cyan]")
-            console.print(f"  [bold]Note A:[/bold] {pair.note_a.title}")
-            console.print(f"  [bold]Note B:[/bold] {pair.note_b.title}")
-            console.print(f"  [bold]Category:[/bold] {pair.note_a.category}")
-            console.print(f"  [bold]Similarity:[/bold] {pair.similarity:.2%}")
+    if not similar_pairs and not database_similar_pairs:
+        console.print("  [green]No similar notes found[/green]\n")
+    else:
+        if similar_pairs:
+            console.print(
+                f"  Found [yellow]{len(similar_pairs)}[/yellow] similar pairs among current notes"
+            )
+        if database_similar_pairs:
+            console.print(
+                f"  Found [yellow]{len(database_similar_pairs)}[/yellow] similar pairs with database notes"
+            )
+        console.print()
+
+        # Display similar pairs among current notes
+        if similar_pairs:
+            console.print("[bold]Proposed merges (current notes):[/bold]")
+            for i, pair in enumerate(similar_pairs, 1):
+                console.print(f"\n[cyan]─── Pair {i} ───[/cyan]")
+                console.print(f"  [bold]Note A:[/bold] {pair.note_a.title}")
+                console.print(f"  [bold]Note B:[/bold] {pair.note_b.title}")
+                console.print(f"  [bold]Category:[/bold] {pair.note_a.category}")
+                console.print(f"  [bold]Similarity:[/bold] {pair.similarity:.2%}")
+
+        # Display similar pairs with database
+        if database_similar_pairs:
+            console.print("\n[bold]Proposed merges (with database):[/bold]")
+            for i, pair in enumerate(database_similar_pairs, 1):
+                console.print(f"\n[cyan]─── Database Pair {i} ───[/cyan]")
+                console.print(f"  [bold]New Note:[/bold] {pair.note_a.title}")
+                console.print(f"  [bold]Database Note:[/bold] {pair.note_b.title}")
+                console.print(f"  [bold]Category:[/bold] {pair.note_a.category}")
+                console.print(f"  [bold]Similarity:[/bold] {pair.similarity:.2%}")
 
     if dry_run:
         console.print("\n[yellow]Dry run complete. No changes were made.[/yellow]")
@@ -132,15 +186,20 @@ def sync(
         raise typer.Exit(1)
     console.print(f"  [green]✓[/green] Connected to Ollama ({settings.ollama_model})\n")
 
-    # Step 4: Interactive merge confirmation
+    # Step 4: Merge and add to database
+    console.print("[bold]Step 4:[/bold] Merge and add notes to database...")
+
+    from recaller.services.merge_engine import MergeEngine
+
+    merge_engine = MergeEngine(ollama_service=ollama)
+
+    merged_page_ids: set[str] = set()  # Track notes that were merged into others
+    database_merged_ids: set[str] = set()  # Track notes merged into database
+
+    # 4a: Handle merges among current notes
     if similar_pairs:
-        console.print("[bold]Step 4:[/bold] Interactive merge confirmation...")
+        console.print("\n[bold]Step 4a:[/bold] Merging similar current notes...")
 
-        from recaller.services.merge_engine import MergeEngine
-
-        merge_engine = MergeEngine(ollama_service=ollama)
-
-        # Create merge proposals from pairs
         proposals = merge_engine.create_proposals_from_pairs(similar_pairs)
         console.print(f"  Created [cyan]{len(proposals)}[/cyan] merge proposal(s)\n")
 
@@ -152,21 +211,16 @@ def sync(
                 f"\n[bold cyan]═══ Merge Proposal {i}/{len(proposals)} ═══[/bold cyan]"
             )
 
-            # Display notes in this proposal
             console.print(f"[bold]Notes to merge ({len(proposal.notes)}):[/bold]")
             for j, note in enumerate(proposal.notes, 1):
                 console.print(f"  {j}. {note.title}")
                 if note.source:
                     console.print(f"     [dim]Source: {note.source}[/dim]")
 
-            # Show similarity info
             if proposal.similarity_scores:
-                avg_sim = (
-                    sum(proposal.similarity_scores) / len(proposal.similarity_scores)
-                )
+                avg_sim = sum(proposal.similarity_scores) / len(proposal.similarity_scores)
                 console.print(f"\n[bold]Average similarity:[/bold] {avg_sim:.2%}")
 
-            # Generate suggested title
             with console.status("[yellow]Generating combined title...[/yellow]"):
                 try:
                     suggested_title = merge_engine.generate_title_for_proposal(proposal)
@@ -176,7 +230,6 @@ def sync(
 
             console.print(f"\n[bold]Suggested title:[/bold] {suggested_title}")
 
-            # Prompt for action
             console.print("\n[bold]Options:[/bold]")
             console.print("  [green]y[/green] - Accept merge with suggested title")
             console.print("  [yellow]e[/yellow] - Edit title before merging")
@@ -195,10 +248,9 @@ def sync(
                 continue
             elif choice == "e":
                 final_title = typer.prompt("Enter new title", default=suggested_title)
-            else:  # 'y' or default
+            else:
                 final_title = suggested_title
 
-            # Execute the merge
             try:
                 result = merge_engine.execute_merge(proposal, final_title)
                 merged_notes.append(result)
@@ -207,31 +259,96 @@ def sync(
                 console.print(f"[red]Error executing merge: {e}[/red]")
                 skipped_proposals += 1
 
-        # Summary
-        console.print("\n[bold]Merge summary:[/bold]")
+        console.print("\n[bold]Current notes merge summary:[/bold]")
         console.print(f"  Merged: [green]{len(merged_notes)}[/green] proposal(s)")
         console.print(f"  Skipped: [yellow]{skipped_proposals}[/yellow] proposal(s)")
 
-        # Update notes list with merged results
         if merged_notes:
-            # Replace merged notes with their merged versions
-            merged_page_ids = set()
             for result in merged_notes:
-                for original in result.original_notes[1:]:  # Skip primary
+                for original in result.original_notes[1:]:
                     merged_page_ids.add(original.notion_page_id)
-                # Update primary note with merged content
                 for i, note in enumerate(notes):
                     if note.notion_page_id == result.merged_note.notion_page_id:
                         notes[i] = result.merged_note
                         break
 
-            # Remove merged secondary notes from processing
             notes = [n for n in notes if n.notion_page_id not in merged_page_ids]
-            console.print(
-                f"  [green]Updated notes list:[/green] {len(notes)} notes to process\n"
-            )
-    else:
-        console.print("[bold]Step 4:[/bold] No merges needed - skipping.\n")
+
+    # 4b: Handle merges with database notes
+    if database_similar_pairs:
+        console.print("\n[bold]Step 4b:[/bold] Merging with existing database notes...")
+
+        for i, pair in enumerate(database_similar_pairs, 1):
+            # Skip if the current note was already merged
+            if pair.note_a.notion_page_id in merged_page_ids:
+                continue
+
+            console.print(f"\n[bold cyan]═══ Database Merge {i}/{len(database_similar_pairs)} ═══[/bold cyan]")
+            console.print(f"  [bold]New note:[/bold] {pair.note_a.title}")
+            console.print(f"  [bold]Existing database note:[/bold] {pair.note_b.title}")
+            console.print(f"  [bold]Similarity:[/bold] {pair.similarity:.2%}")
+
+            console.print("\n[bold]Options:[/bold]")
+            console.print("  [green]y[/green] - Append new note content to existing database entry")
+            console.print("  [red]n[/red] - Skip (add as new entry)")
+            console.print("  [red]q[/red] - Quit database merging")
+
+            choice = typer.prompt("Choice", default="y").lower().strip()
+
+            if choice == "q":
+                console.print("[yellow]Skipping remaining database merges.[/yellow]")
+                break
+            elif choice == "n":
+                console.print("[yellow]Will add as new entry.[/yellow]")
+                continue
+
+            # Append to existing database page
+            success = notion.append_to_database_page(pair.note_b.notion_page_id, pair.note_a)
+            if success:
+                console.print(f"[green]✓ Appended to:[/green] {pair.note_b.title}")
+                database_merged_ids.add(pair.note_a.notion_page_id)
+            else:
+                console.print(f"[red]Failed to append. Will add as new entry.[/red]")
+
+    # 4c: Add remaining notes to database
+    notes_to_add = [n for n in notes if n.notion_page_id not in database_merged_ids]
+
+    if notes_to_add:
+        console.print(f"\n[bold]Step 4c:[/bold] Adding {len(notes_to_add)} notes to database...")
+
+        added_count = 0
+        failed_count = 0
+        embeddings_stored = 0
+
+        with console.status("[yellow]Adding notes to database...[/yellow]"):
+            for note in notes_to_add:
+                result = notion.add_note_to_database(note)
+                if result:
+                    added_count += 1
+                    console.print(f"  [green]✓[/green] {note.title}")
+
+                    # Store embedding locally (using new database page ID)
+                    if note.embedding is not None:
+                        repo.upsert_embedding(
+                            notion_page_id=result,  # new database page ID
+                            title=note.title,
+                            embedding=note.embedding,
+                        )
+                        embeddings_stored += 1
+                else:
+                    failed_count += 1
+                    console.print(f"  [red]✗[/red] {note.title}")
+
+        console.print(f"\n[bold]Database summary:[/bold]")
+        console.print(f"  Added: [green]{added_count}[/green]")
+        console.print(f"  Embeddings stored: [cyan]{embeddings_stored}[/cyan]")
+        console.print(f"  Merged with existing: [cyan]{len(database_merged_ids)}[/cyan]")
+        if failed_count:
+            console.print(f"  Failed: [red]{failed_count}[/red]")
+
+    # Update notes list to exclude database-merged notes
+    notes = [n for n in notes if n.notion_page_id not in database_merged_ids]
+    console.print(f"\n  [green]Notes to process for flashcards:[/green] {len(notes)}\n")
 
     # Step 5: Generate flashcards
     console.print("[bold]Step 5:[/bold] Generating flashcards...")
@@ -242,7 +359,6 @@ def sync(
         ollama_service=ollama,
         cards_per_note_min=settings.cards_per_note_min,
         cards_per_note_max=settings.cards_per_note_max,
-        deck_name=settings.anki_deck_name,
     )
 
     all_flashcards: list = []
@@ -287,15 +403,16 @@ def sync(
     if processed_notes:
         console.print("\n[bold]Step 6:[/bold] Archiving processed notes...")
 
-        archive_ids = [note.notion_page_id for note in processed_notes]
-        archive_results = notion.archive_notes(archive_ids)
+        #[TODO: Archive notes commented to keep notes in current]
+        # archive_ids = [note.notion_page_id for note in processed_notes]
+        # archive_results = notion.archive_notes(archive_ids)
 
-        archived_count = sum(1 for success in archive_results.values() if success)
-        failed_archive = len(archive_results) - archived_count
+        # archived_count = sum(1 for success in archive_results.values() if success)
+        # failed_archive = len(archive_results) - archived_count
 
-        console.print(f"  Archived: [green]{archived_count}[/green] note(s)")
-        if failed_archive > 0:
-            console.print(f"  Failed to archive: [red]{failed_archive}[/red] note(s)")
+        # console.print(f"  Archived: [green]{archived_count}[/green] note(s)")
+        # if failed_archive > 0:
+        #     console.print(f"  Failed to archive: [red]{failed_archive}[/red] note(s)")
     else:
         console.print("\n[bold]Step 6:[/bold] No notes to archive.\n")
 
@@ -320,9 +437,11 @@ def sync(
         else:
             console.print("  [green]✓[/green] Connected to AnkiConnect")
 
-            # Ensure deck exists
-            if anki.ensure_deck_exists(settings.anki_deck_name):
-                console.print(f"  [green]✓[/green] Deck '{settings.anki_deck_name}' ready")
+            # Ensure deck exists (deck name is set per-flashcard based on current date)
+            from recaller.services.flashcard_generator import get_deck_name
+            deck_name = get_deck_name()
+            if anki.ensure_deck_exists(deck_name):
+                console.print(f"  [green]✓[/green] Deck '{deck_name}' ready")
             else:
                 console.print("  [yellow]Warning: Could not verify deck[/yellow]")
 
@@ -422,8 +541,10 @@ def export():
     console.print("[green]✓[/green] Connected to AnkiConnect")
 
     # Ensure deck exists
-    if anki.ensure_deck_exists(settings.anki_deck_name):
-        console.print(f"[green]✓[/green] Deck '{settings.anki_deck_name}' ready")
+    from recaller.services.flashcard_generator import get_deck_name
+    deck_name = get_deck_name()
+    if anki.ensure_deck_exists(deck_name):
+        console.print(f"[green]✓[/green] Deck '{deck_name}' ready")
 
     # Export flashcards
     try:
@@ -477,7 +598,6 @@ def config():
     table.add_row("Embedding Model", settings.embedding_model)
     table.add_row("Similarity Threshold", str(settings.similarity_threshold))
     table.add_row("Database Path", str(settings.database_path))
-    table.add_row("Anki Deck Name", settings.anki_deck_name)
     table.add_row("AnkiConnect URL", settings.ankiconnect_url)
     table.add_row("Cards per Note", f"{settings.cards_per_note_min}-{settings.cards_per_note_max}")
 
@@ -571,6 +691,120 @@ def test_notion(
         console.print("  2. Verify your RECALLER_NOTION_PAGE_ID is the Recaller parent page")
         console.print("  3. Make sure the Notion integration has access to the page")
         raise typer.Exit(1)
+
+
+@app.command("sync-embeddings")
+def sync_embeddings(
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Regenerate all embeddings, even if unchanged"
+    ),
+    batch_size: int = typer.Option(
+        50, "--batch-size", "-b", help="Number of notes to process per batch"
+    ),
+):
+    """
+    Sync embeddings for all notes in the Notion Database.
+
+    This command fetches all notes from the Notes Database,
+    generates embeddings for their titles, and stores them locally.
+    Only notes with changed titles are updated unless --force is used.
+    """
+    try:
+        settings = get_settings()
+    except Exception as e:
+        console.print(f"[red]Configuration error: {e}[/red]")
+        raise typer.Exit(1)
+
+    console.print("[bold blue]Syncing embeddings from Notion Database...[/bold blue]\n")
+
+    # Initialize services
+    from recaller.services.embedding_service import EmbeddingService
+    from recaller.services.notion_client import NotionService
+
+    notion = NotionService(
+        token=settings.notion_token,
+        recaller_page_id=settings.notion_page_id,
+    )
+    embedding_service = EmbeddingService(model_name=settings.embedding_model)
+    repo = get_repository(settings)
+
+    # Step 1: Fetch all notes from Notion Database
+    console.print("[bold]Step 1:[/bold] Fetching notes from Notion Database...")
+    try:
+        notion.ensure_page_structure()
+        database_notes = notion.fetch_database_notes()
+    except Exception as e:
+        console.print(f"[red]Error fetching notes: {e}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"  Found [green]{len(database_notes)}[/green] notes\n")
+
+    if not database_notes:
+        console.print("[yellow]No notes in database.[/yellow]")
+        raise typer.Exit(0)
+
+    # Step 2: Check which notes need embedding updates
+    console.print("[bold]Step 2:[/bold] Checking for changes...")
+
+    notes_to_process = []
+    if force:
+        notes_to_process = database_notes
+        console.print(f"  [yellow]Force mode: processing all {len(notes_to_process)} notes[/yellow]")
+    else:
+        for note in database_notes:
+            existing = repo.get_embedding_by_notion_id(note.notion_page_id)
+            if existing is None:
+                notes_to_process.append(note)
+            else:
+                existing_title, _ = existing
+                if existing_title != note.title:
+                    notes_to_process.append(note)
+
+        skipped = len(database_notes) - len(notes_to_process)
+        console.print(f"  New/changed: [cyan]{len(notes_to_process)}[/cyan]")
+        console.print(f"  Unchanged (skipped): [dim]{skipped}[/dim]\n")
+
+    if not notes_to_process:
+        console.print("[green]All embeddings are up to date![/green]")
+        raise typer.Exit(0)
+
+    # Step 3: Generate and store embeddings
+    console.print(f"[bold]Step 3:[/bold] Generating embeddings for {len(notes_to_process)} notes...")
+
+    processed = 0
+    failed = 0
+
+    # Process in batches for memory efficiency
+    for i in range(0, len(notes_to_process), batch_size):
+        batch = notes_to_process[i : i + batch_size]
+        batch_num = i // batch_size + 1
+        total_batches = (len(notes_to_process) + batch_size - 1) // batch_size
+
+        with console.status(f"[yellow]Processing batch {batch_num}/{total_batches}...[/yellow]"):
+            for note in batch:
+                try:
+                    embedding = embedding_service.generate_note_embedding(note)
+                    repo.upsert_embedding(
+                        notion_page_id=note.notion_page_id,
+                        title=note.title,
+                        embedding=embedding,
+                    )
+                    processed += 1
+                    console.print(f"  [green]✓[/green] {note.title}")
+                except Exception as e:
+                    console.print(f"  [red]✗[/red] {note.title}: {e}")
+                    failed += 1
+
+    console.print(f"\n[bold]Summary:[/bold]")
+    console.print(f"  Processed: [green]{processed}[/green]")
+    if failed:
+        console.print(f"  Failed: [red]{failed}[/red]")
+
+    # Show total embedding count
+    total = repo.get_embedding_count()
+    console.print(f"\n[bold]Total embeddings stored:[/bold] [cyan]{total}[/cyan]")
+
+    console.print("\n[bold blue]Embedding sync complete![/bold blue]")
 
 
 @app.callback()

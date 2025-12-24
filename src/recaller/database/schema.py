@@ -153,6 +153,30 @@ class ExportBatchRecord(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+class EmbeddingRecord(Base):
+    """Lightweight storage for note embeddings from Notion Database."""
+
+    __tablename__ = "note_embeddings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    notion_page_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    title_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_embeddings_notion_page_id", "notion_page_id"),
+        Index("idx_embeddings_title_hash", "title_hash"),
+    )
+
+
 def get_engine(database_url: str):
     """Create database engine."""
     return create_engine(database_url, echo=False)

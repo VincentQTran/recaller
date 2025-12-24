@@ -5,21 +5,28 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from recaller.models.note import NoteStatus
-from recaller.services.notion_client import NotionService
+from recaller.services.notion_client import NotionAPIError, NotionService
 
 
 @pytest.fixture
-def mock_notion_client():
-    """Create a mocked Notion client."""
-    with patch("recaller.services.notion_client.Client") as mock_client_class:
-        mock_client = MagicMock()
-        mock_client_class.return_value = mock_client
-        yield mock_client
+def mock_requests():
+    """Create mocked requests module."""
+    with patch("recaller.services.notion_client.requests") as mock_req:
+        # Create mock response object
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {}
+
+        mock_req.get.return_value = mock_response
+        mock_req.post.return_value = mock_response
+        mock_req.patch.return_value = mock_response
+
+        yield mock_req
 
 
 @pytest.fixture
-def notion_service(mock_notion_client):  # noqa: ARG001
-    """Create NotionService with mocked client."""
+def notion_service(mock_requests):  # noqa: ARG001
+    """Create NotionService with mocked requests."""
     service = NotionService(token="test-token", recaller_page_id="test-page-id")
     return service
 
@@ -27,12 +34,32 @@ def notion_service(mock_notion_client):  # noqa: ARG001
 class TestNotionServiceInit:
     """Tests for NotionService initialization."""
 
-    def test_init_creates_client(self):
-        """Test that initialization creates a Notion client."""
-        with patch("recaller.services.notion_client.Client") as mock_client_class:
-            service = NotionService(token="my-token", recaller_page_id="page-123")
-            mock_client_class.assert_called_once_with(auth="my-token")
-            assert service.recaller_page_id == "page-123"
+    def test_init_creates_service(self):
+        """Test that initialization creates a NotionService correctly."""
+        service = NotionService(token="my-token", recaller_page_id="page-123")
+        assert service.token == "my-token"
+        assert service.recaller_page_id == "page-123"
+        assert service.api_version == "2025-09-03"
+        assert service.base_url == "https://api.notion.com/v1"
+
+
+class TestNotionAPIError:
+    """Tests for NotionAPIError exception."""
+
+    def test_error_with_all_fields(self):
+        """Test error with all fields."""
+        error = NotionAPIError("Test message", status_code=400, code="invalid_request")
+        assert error.message == "Test message"
+        assert error.status_code == 400
+        assert error.code == "invalid_request"
+        assert str(error) == "Test message"
+
+    def test_error_with_defaults(self):
+        """Test error with default values."""
+        error = NotionAPIError("Test message")
+        assert error.message == "Test message"
+        assert error.status_code == 0
+        assert error.code == ""
 
 
 class TestRichTextToMarkdown:
@@ -368,10 +395,12 @@ class TestExtractProperty:
 class TestFetchNotesFromPage:
     """Tests for fetching notes from a specific page."""
 
-    def test_fetch_notes_from_page_success(self, notion_service, mock_notion_client):
+    def test_fetch_notes_from_page_success(self, notion_service, mock_requests):
         """Test successful note fetching from a page."""
-        # Mock children response (list of child pages)
-        mock_notion_client.blocks.children.list.return_value = {
+        # Create mock responses for different API calls
+        children_response = MagicMock()
+        children_response.status_code = 200
+        children_response.json.return_value = {
             "results": [
                 {"type": "child_page", "id": "page-1"},
                 {"type": "child_page", "id": "page-2"},
@@ -379,8 +408,9 @@ class TestFetchNotesFromPage:
             "has_more": False,
         }
 
-        # Mock page retrieve response
-        mock_notion_client.pages.retrieve.return_value = {
+        page_response = MagicMock()
+        page_response.status_code = 200
+        page_response.json.return_value = {
             "id": "page-1",
             "last_edited_time": "2025-01-15T10:00:00.000Z",
             "properties": {
@@ -399,6 +429,22 @@ class TestFetchNotesFromPage:
             },
         }
 
+        content_response = MagicMock()
+        content_response.status_code = 200
+        content_response.json.return_value = {
+            "results": [],
+            "has_more": False,
+        }
+
+        # Set up mock to return different responses for different calls
+        mock_requests.get.side_effect = [
+            children_response,  # First call: get children of parent page
+            page_response,  # Second call: get page-1 details
+            content_response,  # Third call: get page-1 content
+            page_response,  # Fourth call: get page-2 details
+            content_response,  # Fifth call: get page-2 content
+        ]
+
         notes = notion_service._fetch_notes_from_page("some-page-id")
 
         assert len(notes) == 2
@@ -407,9 +453,11 @@ class TestFetchNotesFromPage:
         assert notes[0].source == "https://example.com"
         assert notes[0].status == NoteStatus.NEW
 
-    def test_fetch_notes_skips_non_pages(self, notion_service, mock_notion_client):
+    def test_fetch_notes_skips_non_pages(self, notion_service, mock_requests):
         """Test that non-page blocks are skipped."""
-        mock_notion_client.blocks.children.list.return_value = {
+        children_response = MagicMock()
+        children_response.status_code = 200
+        children_response.json.return_value = {
             "results": [
                 {"type": "paragraph", "id": "para-1"},
                 {"type": "child_page", "id": "page-1"},
@@ -418,12 +466,27 @@ class TestFetchNotesFromPage:
             "has_more": False,
         }
 
-        mock_notion_client.pages.retrieve.return_value = {
+        page_response = MagicMock()
+        page_response.status_code = 200
+        page_response.json.return_value = {
             "id": "page-1",
             "properties": {
                 "title": {"type": "title", "title": [{"plain_text": "Note"}]},
             },
         }
+
+        content_response = MagicMock()
+        content_response.status_code = 200
+        content_response.json.return_value = {
+            "results": [],
+            "has_more": False,
+        }
+
+        mock_requests.get.side_effect = [
+            children_response,
+            page_response,
+            content_response,
+        ]
 
         notes = notion_service._fetch_notes_from_page("some-page-id")
 
@@ -486,9 +549,11 @@ class TestExtractMetadataFromContent:
 class TestPageStructure:
     """Tests for page structure management."""
 
-    def test_find_existing_subpage(self, notion_service, mock_notion_client):
+    def test_find_existing_subpage(self, notion_service, mock_requests):
         """Test finding an existing subpage."""
-        mock_notion_client.blocks.children.list.return_value = {
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
             "results": [
                 {
                     "type": "child_page",
@@ -503,32 +568,42 @@ class TestPageStructure:
             ],
             "has_more": False,
         }
+        mock_requests.get.return_value = mock_response
 
         current_id = notion_service._find_or_create_subpage("Current")
         assert current_id == "current-page-id"
 
-        # pages.create should not be called since page exists
-        mock_notion_client.pages.create.assert_not_called()
+        # post should not be called since page exists
+        mock_requests.post.assert_not_called()
 
-    def test_create_missing_subpage(self, notion_service, mock_notion_client):
+    def test_create_missing_subpage(self, notion_service, mock_requests):
         """Test creating a subpage when it doesn't exist."""
-        mock_notion_client.blocks.children.list.return_value = {
+        children_response = MagicMock()
+        children_response.status_code = 200
+        children_response.json.return_value = {
             "results": [],
             "has_more": False,
         }
 
-        mock_notion_client.pages.create.return_value = {
+        create_response = MagicMock()
+        create_response.status_code = 200
+        create_response.json.return_value = {
             "id": "new-page-id",
         }
+
+        mock_requests.get.return_value = children_response
+        mock_requests.post.return_value = create_response
 
         page_id = notion_service._find_or_create_subpage("Current")
 
         assert page_id == "new-page-id"
-        mock_notion_client.pages.create.assert_called_once()
+        mock_requests.post.assert_called_once()
 
-    def test_ensure_page_structure(self, notion_service, mock_notion_client):
+    def test_ensure_page_structure(self, notion_service, mock_requests):
         """Test ensuring both Current and Archive pages exist."""
-        mock_notion_client.blocks.children.list.return_value = {
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
             "results": [
                 {
                     "type": "child_page",
@@ -543,6 +618,7 @@ class TestPageStructure:
             ],
             "has_more": False,
         }
+        mock_requests.get.return_value = mock_response
 
         current_id, archive_id = notion_service.ensure_page_structure()
 
@@ -550,3 +626,52 @@ class TestPageStructure:
         assert archive_id == "archive-id"
         assert notion_service._current_page_id == "current-id"
         assert notion_service._archive_page_id == "archive-id"
+
+
+class TestAPIHelpers:
+    """Tests for API helper methods."""
+
+    def test_get_headers(self, notion_service):
+        """Test that headers are correctly constructed."""
+        headers = notion_service._get_headers()
+        assert headers["Authorization"] == "Bearer test-token"
+        assert headers["Content-Type"] == "application/json"
+        assert headers["Notion-Version"] == "2025-09-03"
+
+    def test_handle_response_success(self, notion_service):
+        """Test handling successful response."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"id": "test-id"}
+
+        result = notion_service._handle_response(mock_response)
+        assert result == {"id": "test-id"}
+
+    def test_handle_response_error(self, notion_service):
+        """Test handling error response."""
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = {
+            "message": "Invalid request",
+            "code": "invalid_request",
+        }
+
+        with pytest.raises(NotionAPIError) as exc_info:
+            notion_service._handle_response(mock_response)
+
+        assert exc_info.value.message == "Invalid request"
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.code == "invalid_request"
+
+    def test_handle_response_error_non_json(self, notion_service):
+        """Test handling error response with non-JSON body."""
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.json.side_effect = ValueError("No JSON")
+        mock_response.text = "Internal Server Error"
+
+        with pytest.raises(NotionAPIError) as exc_info:
+            notion_service._handle_response(mock_response)
+
+        assert exc_info.value.message == "Internal Server Error"
+        assert exc_info.value.status_code == 500

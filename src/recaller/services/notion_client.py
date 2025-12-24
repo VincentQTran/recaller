@@ -1,27 +1,64 @@
-"""Notion API client for fetching notes."""
+"""Notion API client for fetching notes.
+
+Uses the Notion REST API directly via requests library.
+"""
 
 import re
 from datetime import datetime
-from typing import Any, Optional, cast
+from typing import Any, Optional
 
-from notion_client import Client
-from notion_client.errors import APIResponseError
+import requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from recaller.models.note import Note, NoteStatus
 
 
+class NotionAPIError(Exception):
+    """Exception raised for Notion API errors.
+
+    Args:
+        message (str): Error message
+        status_code (int): HTTP status code
+        code (str): Notion error code
+
+    Attributes:
+        message (str): Error message
+        status_code (int): HTTP status code
+        code (str): Notion error code
+    """
+
+    def __init__(self, message: str, status_code: int = 0, code: str = ""):
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+        super().__init__(self.message)
+
+
 class NotionService:
     """Service for interacting with Notion API.
+
+    Uses raw HTTP requests to the Notion REST API.
 
     Manages notes in a Recaller page structure:
         Recaller (parent page)
         ├── Current (notes for this week)
-        └── Archive (archived notes)
+        ├── Archive (archived notes)
+        └── Notes Database (full page database)
+
+    Args:
+        token (str): Notion integration token
+        recaller_page_id (str): ID of the "Recaller" parent page
+
+    Attributes:
+        token (str): Notion integration token
+        api_version (str): Notion API version
+        base_url (str): Notion API base URL
+        recaller_page_id (str): ID of the "Recaller" parent page
     """
 
     CURRENT_PAGE_NAME = "Current"
     ARCHIVE_PAGE_NAME = "Archive"
+    DATABASE_NAME = "Notes Database"
 
     def __init__(self, token: str, recaller_page_id: str):
         """Initialize Notion client.
@@ -30,10 +67,104 @@ class NotionService:
             token: Notion integration token
             recaller_page_id: ID of the "Recaller" parent page
         """
-        self.client = Client(auth=token)
+        self.token = token
+        self.api_version = "2025-09-03"
+        self.base_url = "https://api.notion.com/v1"
         self.recaller_page_id = recaller_page_id
         self._current_page_id: Optional[str] = None
         self._archive_page_id: Optional[str] = None
+        self._database_id: Optional[str] = None
+        self._data_source_id: Optional[str] = None
+
+    def _get_headers(self) -> dict[str, str]:
+        """Get standard headers for Notion API requests.
+
+        Returns:
+            dict[str, str]: Headers dict with Authorization, Content-Type, and Notion-Version
+        """
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+            "Notion-Version": self.api_version,
+        }
+
+    def _handle_response(self, response: requests.Response) -> dict[str, Any]:
+        """Handle API response and raise NotionAPIError on failure.
+
+        Args:
+            response (requests.Response): Response from requests library
+
+        Returns:
+            dict[str, Any]: Parsed JSON response
+
+        Raises:
+            NotionAPIError: If the API returns an error status
+        """
+        if response.status_code >= 400:
+            try:
+                error_data = response.json()
+                raise NotionAPIError(
+                    message=error_data.get("message", "Unknown error"),
+                    status_code=response.status_code,
+                    code=error_data.get("code", ""),
+                )
+            except (ValueError, KeyError):
+                raise NotionAPIError(
+                    message=response.text or "Unknown error",
+                    status_code=response.status_code,
+                )
+        return response.json()
+
+    def _post(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Make a POST request to the Notion API.
+
+        Args:
+            endpoint (str): API endpoint path (e.g., "/pages")
+            payload (dict[str, Any]): JSON payload to send
+
+        Returns:
+            dict[str, Any]: Parsed JSON response
+        """
+        response = requests.post(
+            f"{self.base_url}{endpoint}",
+            headers=self._get_headers(),
+            json=payload,
+        )
+        return self._handle_response(response)
+
+    def _get(self, endpoint: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Make a GET request to the Notion API.
+
+        Args:
+            endpoint (str): API endpoint path (e.g., "/pages/{page_id}")
+            params (dict[str, Any], optional): Query parameters
+
+        Returns:
+            dict[str, Any]: Parsed JSON response
+        """
+        response = requests.get(
+            f"{self.base_url}{endpoint}",
+            headers=self._get_headers(),
+            params=params,
+        )
+        return self._handle_response(response)
+
+    def _patch(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Make a PATCH request to the Notion API.
+
+        Args:
+            endpoint (str): API endpoint path (e.g., "/pages/{page_id}")
+            payload (dict[str, Any]): JSON payload to send
+
+        Returns:
+            dict[str, Any]: Parsed JSON response
+        """
+        response = requests.patch(
+            f"{self.base_url}{endpoint}",
+            headers=self._get_headers(),
+            json=payload,
+        )
+        return self._handle_response(response)
 
     def ensure_page_structure(self) -> tuple[str, str]:
         """Ensure Current and Archive pages exist, creating them if needed.
@@ -69,19 +200,302 @@ class NotionService:
             self._archive_page_id = self._find_or_create_subpage(self.ARCHIVE_PAGE_NAME)
         return self._archive_page_id
 
+    def get_database_id(self) -> str:
+        """Get the Notes Database ID, ensuring it exists.
+
+        Returns:
+            Database ID
+        """
+        if not self._database_id:
+            self._database_id = self._find_or_create_database()
+        return self._database_id
+
+    def get_data_source_id(self) -> str:
+        """Get the Notes Database data source ID, ensuring it exists.
+
+        Returns:
+            Data source ID
+        """
+        if not self._data_source_id:
+            database_id = self.get_database_id()
+            self._data_source_id = self._get_data_source_id_from_database(database_id)
+        return self._data_source_id
+
+    def _find_or_create_database(self) -> str:
+        """Find the Notes Database or create it if it doesn't exist.
+
+        Returns:
+            Database ID
+        """
+        # Search for existing database
+        children = self._get_all_children(self.recaller_page_id)
+
+        for child in children:
+            if child.get("type") == "child_database":
+                db_title = child.get("child_database", {}).get("title", "")
+                if db_title == self.DATABASE_NAME:
+                    return child["id"]
+
+        # Database not found, create it
+        return self._create_database()
+
+    def _create_database(self) -> str:
+        """Create the Notes Database with required columns.
+
+        Uses the initial_data_source format for API version 2025-09-03.
+
+        Returns:
+            Database ID
+        """
+        payload = {
+            "parent": {"type": "page_id", "page_id": self.recaller_page_id},
+            "title": [{"type": "text", "text": {"content": self.DATABASE_NAME}}],
+            "initial_data_source": {
+                "properties": {
+                    "Title": {"title": {}},
+                    "Category": {"select": {"options": []}},
+                    "Source": {"rich_text": {}},
+                    "Date Imported": {"date": {}},
+                }
+            },
+        }
+        result = self._post("/databases", payload)
+        # Extract data source ID from response
+        if "data_sources" in result and len(result["data_sources"]) > 0:
+            self._data_source_id = result["data_sources"][0]["id"]
+        return result["id"]
+
+    def _get_data_source_id_from_database(self, database_id: str) -> str:
+        """Get the data source ID from a database.
+
+        Args:
+            database_id (str): Database ID
+
+        Returns:
+            str: Data source ID (first data source if multiple exist)
+
+        Raises:
+            ValueError: If no data sources found for the database
+        """
+        result = self._get(f"/databases/{database_id}")
+        if "data_sources" in result and len(result["data_sources"]) > 0:
+            return result["data_sources"][0]["id"]
+        raise ValueError(f"No data sources found for database {database_id}")
+
+    def fetch_database_notes(self) -> list[Note]:
+        """Fetch all notes from the Notes Database.
+
+        Returns:
+            List of Note objects from the database
+        """
+        database_id = self.get_database_id()
+        notes = []
+
+        # Use search API to find all pages in the database
+        cursor: Optional[str] = None
+        while True:
+            payload: dict[str, Any] = {
+                "filter": {
+                    "property": "object",
+                    "value": "page",
+                },
+                "page_size": 100,
+            }
+            if cursor:
+                payload["start_cursor"] = cursor
+
+            response = self._post("/search", payload)
+
+            for page in response.get("results", []):
+                # Filter to only pages in our database/data source
+                parent = page.get("parent", {})
+                parent_type = parent.get("type")
+
+                # Handle both database_id (legacy) and data_source_id (2025-09-03)
+                if parent_type == "database_id":
+                    parent_db_id = parent.get("database_id", "").replace("-", "")
+                    if parent_db_id == database_id.replace("-", ""):
+                        note = self._database_page_to_note(page)
+                        if note:
+                            notes.append(note)
+                elif parent_type == "data_source_id":
+                    # Check if this data source belongs to our database
+                    parent_data_source_id = parent.get("data_source_id", "")
+                    try:
+                        our_data_source_id = self.get_data_source_id()
+                        if parent_data_source_id == our_data_source_id:
+                            note = self._database_page_to_note(page)
+                            if note:
+                                notes.append(note)
+                    except ValueError:
+                        # If we can't get data source ID, skip this page
+                        pass
+
+            if not response.get("has_more"):
+                break
+            cursor = response.get("next_cursor")
+
+        return notes
+
+    def _database_page_to_note(self, page: dict[str, Any]) -> Optional[Note]:
+        """Convert a database page to a Note object.
+
+        Args:
+            page (dict[str, Any]): Notion database page object
+
+        Returns:
+            Optional[Note]: Note object or None if conversion fails
+        """
+        try:
+            page_id = page["id"]
+            properties = page.get("properties", {})
+
+            # Extract title
+            title_prop = properties.get("Title", {})
+            title_parts = title_prop.get("title", [])
+            title = "".join(t.get("plain_text", "") for t in title_parts) if title_parts else ""
+
+            if not title:
+                return None
+
+            # Extract category
+            category_prop = properties.get("Category", {})
+            category_select = category_prop.get("select")
+            category = category_select.get("name", "") if category_select else ""
+
+            # Extract source (rich_text)
+            source_prop = properties.get("Source", {})
+            source_texts = source_prop.get("rich_text", [])
+            source = "".join(t.get("plain_text", "") for t in source_texts) if source_texts else ""
+
+            # Fetch content
+            content = self._fetch_content(page_id)
+
+            # Parse last edited time
+            last_edited = None
+            if page.get("last_edited_time"):
+                last_edited = datetime.fromisoformat(
+                    page["last_edited_time"].replace("Z", "+00:00")
+                )
+
+            return Note(
+                notion_page_id=page_id,
+                title=title,
+                category=category,
+                source=source,
+                content=content,
+                notion_last_edited=last_edited,
+                status=NoteStatus.NEW,
+            )
+        except Exception:
+            return None
+
+    def add_note_to_database(self, note: Note) -> Optional[str]:
+        """Add a note to the Notes Database.
+
+        Args:
+            note (Note): Note to add
+
+        Returns:
+            Optional[str]: Page ID of created database entry, or None if failed
+        """
+        data_source_id = self.get_data_source_id()
+
+        try:
+            # Build properties
+            properties: dict[str, Any] = {
+                "Title": {"title": [{"text": {"content": note.title}}]},
+                "Date Imported": {"date": {"start": datetime.now().isoformat()}},
+            }
+
+            if note.category:
+                properties["Category"] = {"select": {"name": note.category}}
+
+            if note.source:
+                properties["Source"] = {"rich_text": [{"text": {"content": note.source}}]}
+
+            # Create the database page using data_source_id
+            payload = {
+                "parent": {"type": "data_source_id", "data_source_id": data_source_id},
+                "properties": properties,
+            }
+            response = self._post("/pages", payload)
+
+            new_page_id = response["id"]
+
+            # Copy content blocks from original note
+            if note.notion_page_id:
+                blocks = self._get_all_children(note.notion_page_id)
+                if blocks:
+                    self._copy_blocks_to_page(new_page_id, blocks)
+
+            return new_page_id
+        except NotionAPIError as e:
+            print(f"Failed to add note to database: {e}")
+            return None
+
+    def add_notes_to_database(self, notes: list[Note]) -> dict[str, Optional[str]]:
+        """Add multiple notes to the Notes Database.
+
+        Args:
+            notes (list[Note]): List of notes to add
+
+        Returns:
+            dict[str, Optional[str]]: Dict mapping original notion_page_id to new database page ID
+        """
+        results = {}
+        for note in notes:
+            results[note.notion_page_id] = self.add_note_to_database(note)
+        return results
+
+    def append_to_database_page(self, database_page_id: str, note: Note) -> bool:
+        """Append content from a note to an existing database page.
+
+        Adds a divider and the note's content blocks to the end of the existing page.
+
+        Args:
+            database_page_id (str): ID of the existing database page
+            note (Note): Note whose content will be appended
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Fetch content blocks from the source note
+            if not note.notion_page_id:
+                return False
+
+            blocks = self._get_all_children(note.notion_page_id)
+            if not blocks:
+                return True  # Nothing to append
+
+            # Add a divider first
+            self._patch(
+                f"/blocks/{database_page_id}/children",
+                {"children": [{"type": "divider", "divider": {}}]},
+            )
+
+            # Copy content blocks
+            self._copy_blocks_to_page(database_page_id, blocks)
+
+            return True
+        except NotionAPIError as e:
+            print(f"Failed to append to database page: {e}")
+            return False
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(APIResponseError),
+        retry=retry_if_exception_type(NotionAPIError),
     )
     def _find_or_create_subpage(self, page_name: str) -> str:
         """Find a subpage by name or create it if it doesn't exist.
 
         Args:
-            page_name: Name of the subpage to find/create
+            page_name (str): Name of the subpage to find/create
 
         Returns:
-            Page ID of the found or created page
+            str: Page ID of the found or created page
         """
         # Search for existing page
         children = self._get_all_children(self.recaller_page_id)
@@ -98,40 +512,36 @@ class NotionService:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(APIResponseError),
+        retry=retry_if_exception_type(NotionAPIError),
     )
     def _create_subpage(self, page_name: str) -> str:
         """Create a new subpage under the Recaller page.
 
         Args:
-            page_name: Name for the new page
+            page_name (str): Name for the new page
 
         Returns:
-            ID of the created page
+            str: ID of the created page
         """
-        response: dict[str, Any] = cast(
-            dict[str, Any],
-            self.client.pages.create(
-                parent={"page_id": self.recaller_page_id},
-                properties={
-                    "title": {
-                        "title": [{"text": {"content": page_name}}]
-                    }
-                },
-            ),
-        )
+        payload = {
+            "parent": {"page_id": self.recaller_page_id},
+            "properties": {
+                "title": {"title": [{"text": {"content": page_name}}]}
+            },
+        }
+        response = self._post("/pages", payload)
         return response["id"]
 
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(APIResponseError),
+        retry=retry_if_exception_type(NotionAPIError),
     )
     def fetch_current_notes(self) -> list[Note]:
         """Fetch all notes from the Current page.
 
         Returns:
-            List of Note objects from the Current page
+            list[Note]: List of Note objects from the Current page
         """
         current_page_id = self.get_current_page_id()
         return self._fetch_notes_from_page(current_page_id)
@@ -139,13 +549,13 @@ class NotionService:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(APIResponseError),
+        retry=retry_if_exception_type(NotionAPIError),
     )
     def fetch_archive_notes(self) -> list[Note]:
         """Fetch all notes from the Archive page.
 
         Returns:
-            List of Note objects from the Archive page
+            list[Note]: List of Note objects from the Archive page
         """
         archive_page_id = self.get_archive_page_id()
         return self._fetch_notes_from_page(archive_page_id)
@@ -154,10 +564,10 @@ class NotionService:
         """Fetch all note subpages from a given page.
 
         Args:
-            page_id: Parent page ID to fetch notes from
+            page_id (str): Parent page ID to fetch notes from
 
         Returns:
-            List of Note objects
+            list[Note]: List of Note objects
         """
         notes = []
         children = self._get_all_children(page_id)
@@ -171,45 +581,214 @@ class NotionService:
 
         return notes
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(APIResponseError),
-    )
     def archive_note(self, note_page_id: str) -> bool:
         """Move a note from Current to Archive.
 
+        Since the Notion API doesn't support moving pages between parents,
+        this creates a copy in Archive and then trashes the original.
+
         Args:
-            note_page_id: ID of the note page to archive
+            note_page_id (str): ID of the note page to archive
 
         Returns:
-            True if successful, False otherwise
+            bool: True if successful, False otherwise
         """
-        archive_page_id = self.get_archive_page_id()
-
         try:
-            # Update the page's parent to move it to Archive
-            self.client.pages.update(
-                page_id=note_page_id,
-                parent={"page_id": archive_page_id},
-            )
+            # 1. Fetch the original page
+            page = self._get(f"/pages/{note_page_id}")
+
+            # 2. Extract title
+            title = self._extract_title(page)
+            if not title:
+                return False
+
+            # 3. Fetch content blocks
+            blocks = self._get_all_children(note_page_id)
+
+            # 4. Create new page in Archive
+            archive_page_id = self.get_archive_page_id()
+            payload = {
+                "parent": {"page_id": archive_page_id},
+                "properties": {
+                    "title": {"title": [{"text": {"content": title}}]}
+                },
+            }
+            new_page = self._post("/pages", payload)
+
+            # 5. Copy content blocks to new page
+            if blocks:
+                self._copy_blocks_to_page(new_page["id"], blocks)
+
+            # 6. Trash the original page
+            self._patch(f"/pages/{note_page_id}", {"archived": True})
+
             return True
-        except APIResponseError:
+        except NotionAPIError as e:
+            print(f"Failed to archive note {note_page_id}: {e}")
             return False
+
+    def _copy_blocks_to_page(self, page_id: str, blocks: list[dict[str, Any]]) -> None:
+        """Copy blocks to a page, including nested children.
+
+        Args:
+            page_id (str): Target page ID
+            blocks (list[dict[str, Any]]): List of block objects to copy
+        """
+        children = []
+        for block in blocks:
+            converted = self._convert_block_for_copy(block)
+            if converted:
+                # Handle nested children for blocks that support them
+                if block.get("has_children"):
+                    nested_blocks = self._get_all_children(block["id"])
+                    nested_children = []
+                    for nested_block in nested_blocks:
+                        nested_converted = self._convert_block_for_copy(nested_block)
+                        if nested_converted:
+                            # Recursively handle deeply nested children
+                            if nested_block.get("has_children"):
+                                nested_converted = self._convert_block_with_children(nested_block)
+                            nested_children.append(nested_converted)
+                    if nested_children:
+                        block_type = converted["type"]
+                        converted[block_type]["children"] = nested_children
+                children.append(converted)
+
+        if children:
+            # Notion API allows max 100 blocks per request
+            for i in range(0, len(children), 100):
+                batch = children[i : i + 100]
+                self._patch(f"/blocks/{page_id}/children", {"children": batch})
+
+    def _convert_block_with_children(self, block: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Convert a block including its nested children recursively.
+
+        Args:
+            block (dict[str, Any]): Original block object
+
+        Returns:
+            Optional[dict[str, Any]]: Block object with children included, or None if unsupported
+        """
+        converted = self._convert_block_for_copy(block)
+        if not converted:
+            return None
+
+        if block.get("has_children"):
+            nested_blocks = self._get_all_children(block["id"])
+            nested_children = []
+            for nested_block in nested_blocks:
+                nested_converted = self._convert_block_with_children(nested_block)
+                if nested_converted:
+                    nested_children.append(nested_converted)
+            if nested_children:
+                block_type = converted["type"]
+                converted[block_type]["children"] = nested_children
+
+        return converted
+
+    def _convert_block_for_copy(self, block: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Convert a block to the format needed for creating a copy.
+
+        Args:
+            block (dict[str, Any]): Original block object
+
+        Returns:
+            Optional[dict[str, Any]]: Block object suitable for creation, or None if unsupported
+        """
+        block_type = block.get("type")
+        if not block_type or block_type in ("child_page", "child_database"):
+            return None
+
+        block_data = block.get(block_type, {})
+
+        # Handle different block types
+        if block_type == "paragraph":
+            return {"type": "paragraph", "paragraph": {"rich_text": block_data.get("rich_text", [])}}
+        elif block_type == "heading_1":
+            return {"type": "heading_1", "heading_1": {"rich_text": block_data.get("rich_text", [])}}
+        elif block_type == "heading_2":
+            return {"type": "heading_2", "heading_2": {"rich_text": block_data.get("rich_text", [])}}
+        elif block_type == "heading_3":
+            return {"type": "heading_3", "heading_3": {"rich_text": block_data.get("rich_text", [])}}
+        elif block_type == "bulleted_list_item":
+            return {
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": block_data.get("rich_text", [])},
+            }
+        elif block_type == "numbered_list_item":
+            return {
+                "type": "numbered_list_item",
+                "numbered_list_item": {"rich_text": block_data.get("rich_text", [])},
+            }
+        elif block_type == "to_do":
+            return {
+                "type": "to_do",
+                "to_do": {
+                    "rich_text": block_data.get("rich_text", []),
+                    "checked": block_data.get("checked", False),
+                },
+            }
+        elif block_type == "toggle":
+            return {"type": "toggle", "toggle": {"rich_text": block_data.get("rich_text", [])}}
+        elif block_type == "code":
+            return {
+                "type": "code",
+                "code": {
+                    "rich_text": block_data.get("rich_text", []),
+                    "language": block_data.get("language", "plain text"),
+                },
+            }
+        elif block_type == "quote":
+            return {"type": "quote", "quote": {"rich_text": block_data.get("rich_text", [])}}
+        elif block_type == "callout":
+            result: dict[str, Any] = {
+                "type": "callout",
+                "callout": {"rich_text": block_data.get("rich_text", [])},
+            }
+            if block_data.get("icon"):
+                result["callout"]["icon"] = block_data["icon"]
+            return result
+        elif block_type == "divider":
+            return {"type": "divider", "divider": {}}
+        elif block_type == "bookmark":
+            return {"type": "bookmark", "bookmark": {"url": block_data.get("url", "")}}
+        elif block_type == "image":
+            # Get the image URL (external or Notion-hosted file)
+            image_type = block_data.get("type")
+            url = ""
+            if image_type == "external":
+                url = block_data.get("external", {}).get("url", "")
+            elif image_type == "file":
+                # Notion-hosted images have temporary signed URLs
+                url = block_data.get("file", {}).get("url", "")
+
+            if url:
+                # Create as external image (Notion API only allows external for creation)
+                result = {
+                    "type": "image",
+                    "image": {"type": "external", "external": {"url": url}},
+                }
+                # Preserve caption if present
+                if block_data.get("caption"):
+                    result["image"]["caption"] = block_data["caption"]
+                return result
+            return None
+
+        return None
 
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(APIResponseError),
+        retry=retry_if_exception_type(NotionAPIError),
     )
     def archive_notes(self, note_page_ids: list[str]) -> dict[str, bool]:
         """Move multiple notes from Current to Archive.
 
         Args:
-            note_page_ids: List of note page IDs to archive
+            note_page_ids (list[str]): List of note page IDs to archive
 
         Returns:
-            Dict mapping page_id to success status
+            dict[str, bool]: Dict mapping page_id to success status
         """
         results = {}
         for page_id in note_page_ids:
@@ -221,7 +800,7 @@ class NotionService:
         """Fetch all notes from Current page (legacy method).
 
         Returns:
-            List of Note objects from Notion
+            list[Note]: List of Note objects from Notion
         """
         return self.fetch_current_notes()
 
@@ -229,22 +808,20 @@ class NotionService:
         """Get all child blocks with pagination.
 
         Args:
-            block_id: Parent block ID
+            block_id (str): Parent block ID
 
         Returns:
-            List of child block objects
+            list[dict[str, Any]]: List of child block objects
         """
         children: list[dict[str, Any]] = []
         cursor: Optional[str] = None
 
         while True:
-            response: dict[str, Any] = cast(
-                dict[str, Any],
-                self.client.blocks.children.list(
-                    block_id=block_id,
-                    start_cursor=cursor,
-                ),
-            )
+            params: dict[str, Any] = {}
+            if cursor:
+                params["start_cursor"] = cursor
+
+            response = self._get(f"/blocks/{block_id}/children", params=params)
             children.extend(response["results"])
 
             if not response.get("has_more"):
@@ -256,22 +833,20 @@ class NotionService:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(APIResponseError),
+        retry=retry_if_exception_type(NotionAPIError),
     )
     def _fetch_page_as_note(self, page_id: str) -> Optional[Note]:
         """Fetch a single page and convert to Note.
 
         Args:
-            page_id: Notion page ID
+            page_id (str): Notion page ID
 
         Returns:
-            Note object or None if page cannot be parsed
+            Optional[Note]: Note object or None if page cannot be parsed
         """
         try:
             # Fetch page properties
-            page: dict[str, Any] = cast(
-                dict[str, Any], self.client.pages.retrieve(page_id=page_id)
-            )
+            page = self._get(f"/pages/{page_id}")
 
             # Parse properties
             title = self._extract_title(page)
@@ -280,8 +855,9 @@ class NotionService:
 
             # Try to get category/source from page properties first
             category = self._extract_property(page, "Category", "select")
-            source = self._extract_property(page, "Source", "url") or \
-                     self._extract_property(page, "Source", "rich_text")
+            source = self._extract_property(page, "Source", "url") or self._extract_property(
+                page, "Source", "rich_text"
+            )
 
             # Parse last edited time
             last_edited = None
@@ -309,24 +885,22 @@ class NotionService:
                 status=NoteStatus.NEW,
             )
 
-        except APIResponseError:
+        except NotionAPIError:
             raise
         except Exception:
             return None
 
-    def _extract_metadata_from_content(
-        self, content: str, field: str
-    ) -> Optional[str]:
+    def _extract_metadata_from_content(self, content: str, field: str) -> Optional[str]:
         """Extract metadata (category/source) from content text.
 
         Looks for patterns like "Category: value" or "source: value" (case-insensitive).
 
         Args:
-            content: The note content as markdown
-            field: The field name to look for ("category" or "source")
+            content (str): The note content as markdown
+            field (str): The field name to look for ("category" or "source")
 
         Returns:
-            The extracted value or None if not found
+            Optional[str]: The extracted value or None if not found
         """
         # Pattern matches "field: value" at start of line, case-insensitive
         # Uses [ \t]* instead of \s* to avoid matching newlines
@@ -345,10 +919,10 @@ class NotionService:
         """Extract title from page properties.
 
         Args:
-            page: Notion page object
+            page (dict[str, Any]): Notion page object
 
         Returns:
-            Title string or None
+            Optional[str]: Title string or None
         """
         properties = page.get("properties", {})
 
@@ -369,18 +943,16 @@ class NotionService:
 
         return None
 
-    def _extract_property(
-        self, page: dict[str, Any], prop_name: str, prop_type: str
-    ) -> Optional[str]:
+    def _extract_property(self, page: dict[str, Any], prop_name: str, prop_type: str) -> Optional[str]:
         """Extract a property value from page.
 
         Args:
-            page: Notion page object
-            prop_name: Property name to look for
-            prop_type: Expected property type
+            page (dict[str, Any]): Notion page object
+            prop_name (str): Property name to look for
+            prop_type (str): Expected property type
 
         Returns:
-            Property value as string or None
+            Optional[str]: Property value as string or None
         """
         properties = page.get("properties", {})
         prop = properties.get(prop_name)
@@ -411,10 +983,10 @@ class NotionService:
         """Fetch all content blocks from a page as markdown.
 
         Args:
-            page_id: Notion page ID
+            page_id (str): Notion page ID
 
         Returns:
-            Content as markdown string
+            str: Content as markdown string
         """
         blocks = self._get_all_children(page_id)
         return self._blocks_to_markdown(blocks)
@@ -423,11 +995,11 @@ class NotionService:
         """Convert Notion blocks to markdown.
 
         Args:
-            blocks: List of Notion block objects
-            indent: Current indentation level
+            blocks (list[dict[str, Any]]): List of Notion block objects
+            indent (int): Current indentation level
 
         Returns:
-            Markdown string
+            str: Markdown string
         """
         lines = []
         indent_str = "  " * indent
@@ -436,30 +1008,22 @@ class NotionService:
             block_type = block.get("type")
 
             if block_type == "paragraph":
-                text = self._rich_text_to_markdown(
-                    block.get("paragraph", {}).get("rich_text", [])
-                )
+                text = self._rich_text_to_markdown(block.get("paragraph", {}).get("rich_text", []))
                 if text:
                     lines.append(f"{indent_str}{text}")
                 else:
                     lines.append("")
 
             elif block_type == "heading_1":
-                text = self._rich_text_to_markdown(
-                    block.get("heading_1", {}).get("rich_text", [])
-                )
+                text = self._rich_text_to_markdown(block.get("heading_1", {}).get("rich_text", []))
                 lines.append(f"{indent_str}# {text}")
 
             elif block_type == "heading_2":
-                text = self._rich_text_to_markdown(
-                    block.get("heading_2", {}).get("rich_text", [])
-                )
+                text = self._rich_text_to_markdown(block.get("heading_2", {}).get("rich_text", []))
                 lines.append(f"{indent_str}## {text}")
 
             elif block_type == "heading_3":
-                text = self._rich_text_to_markdown(
-                    block.get("heading_3", {}).get("rich_text", [])
-                )
+                text = self._rich_text_to_markdown(block.get("heading_3", {}).get("rich_text", []))
                 lines.append(f"{indent_str}### {text}")
 
             elif block_type == "bulleted_list_item":
@@ -486,17 +1050,13 @@ class NotionService:
                         lines.append(nested)
 
             elif block_type == "to_do":
-                text = self._rich_text_to_markdown(
-                    block.get("to_do", {}).get("rich_text", [])
-                )
+                text = self._rich_text_to_markdown(block.get("to_do", {}).get("rich_text", []))
                 checked = block.get("to_do", {}).get("checked", False)
                 checkbox = "[x]" if checked else "[ ]"
                 lines.append(f"{indent_str}- {checkbox} {text}")
 
             elif block_type == "toggle":
-                text = self._rich_text_to_markdown(
-                    block.get("toggle", {}).get("rich_text", [])
-                )
+                text = self._rich_text_to_markdown(block.get("toggle", {}).get("rich_text", []))
                 lines.append(f"{indent_str}<details>")
                 lines.append(f"{indent_str}<summary>{text}</summary>")
                 if block.get("has_children"):
@@ -515,9 +1075,7 @@ class NotionService:
                 lines.append(f"{indent_str}```")
 
             elif block_type == "quote":
-                text = self._rich_text_to_markdown(
-                    block.get("quote", {}).get("rich_text", [])
-                )
+                text = self._rich_text_to_markdown(block.get("quote", {}).get("rich_text", []))
                 for line in text.split("\n"):
                     lines.append(f"{indent_str}> {line}")
 
@@ -559,10 +1117,10 @@ class NotionService:
         """Convert Notion rich text to markdown.
 
         Args:
-            rich_text: List of rich text objects
+            rich_text (list[dict[str, Any]]): List of rich text objects
 
         Returns:
-            Markdown string
+            str: Markdown string
         """
         parts = []
 
