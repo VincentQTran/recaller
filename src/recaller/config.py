@@ -1,7 +1,7 @@
 """Configuration management for Recaller."""
 
-from pathlib import Path
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,10 +19,27 @@ class Settings(BaseSettings):
 
     # Notion
     notion_token: str = Field(description="Notion integration token")
-    notion_random_page_id: str = Field(description="ID of the 'Random' page in Notion")
+    notion_page_id: str = Field(description="ID of the 'Recaller' parent page in Notion")
 
-    # Gemini
-    gemini_api_key: str = Field(description="Google Gemini API key")
+    # Ollama LLM
+    ollama_host: str = Field(
+        default="https://ollama.com",
+        description="Ollama API host",
+    )
+    ollama_model: str = Field(
+        default="gpt-oss:120b-cloud",
+        description="Ollama model to use for generation",
+    )
+    ollama_api_key: str = Field(
+        default="",
+        description="Ollama API key (default: from OLLAMA_API_KEY env var)",
+    )
+
+    # Gemini (optional, fallback)
+    gemini_api_key: str = Field(
+        default="",
+        description="Google Gemini API key (optional if using Ollama)",
+    )
 
     # Embeddings
     embedding_model: str = Field(

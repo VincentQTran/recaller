@@ -25,8 +25,8 @@ from sqlalchemy.orm import (
     sessionmaker,
 )
 
+from recaller.models.flashcard import ExportStatus, FlashcardType
 from recaller.models.note import NoteStatus
-from recaller.models.flashcard import FlashcardType, ExportStatus
 
 
 class Base(DeclarativeBase):

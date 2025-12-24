@@ -1,23 +1,23 @@
 """Repository for database CRUD operations."""
 
-import json
 import hashlib
+import json
 from datetime import datetime
 from typing import Optional
 
 import numpy as np
 from sqlalchemy import select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
-from recaller.models.note import Note, NoteStatus
-from recaller.models.flashcard import Flashcard, FlashcardType, ExportStatus
 from recaller.database.schema import (
-    NoteRecord,
+    ExportBatchRecord,
     FlashcardRecord,
     MergeHistoryRecord,
-    ExportBatchRecord,
+    NoteRecord,
     init_database,
 )
+from recaller.models.flashcard import ExportStatus, Flashcard, FlashcardType
+from recaller.models.note import Note, NoteStatus
 
 
 class Repository:
@@ -300,7 +300,9 @@ class Repository:
             created_at=record.created_at,
             updated_at=record.updated_at,
             notion_last_edited=record.notion_last_edited,
-            status=NoteStatus(record.status.value if hasattr(record.status, 'value') else record.status),
+            status=NoteStatus(
+                record.status.value if hasattr(record.status, "value") else record.status
+            ),
             embedding=self._deserialize_embedding(record.embedding),
             merge_group_id=record.merge_group_id,
             is_merge_parent=record.is_merge_parent,
@@ -313,11 +315,19 @@ class Repository:
             note_id=record.note_id,
             front=record.front,
             back=record.back,
-            card_type=FlashcardType(record.card_type.value if hasattr(record.card_type, 'value') else record.card_type),
+            card_type=FlashcardType(
+                record.card_type.value
+                if hasattr(record.card_type, "value")
+                else record.card_type
+            ),
             tags=json.loads(record.tags) if record.tags else [],
             deck_name=record.deck_name,
             created_at=record.created_at,
-            export_status=ExportStatus(record.export_status.value if hasattr(record.export_status, 'value') else record.export_status),
+            export_status=ExportStatus(
+                record.export_status.value
+                if hasattr(record.export_status, "value")
+                else record.export_status
+            ),
             anki_note_id=record.anki_note_id,
             export_batch_id=record.export_batch_id,
         )

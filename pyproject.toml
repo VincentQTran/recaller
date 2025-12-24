@@ -15,8 +15,8 @@ dependencies = [
     # Database
     "sqlalchemy>=2.0.0",
 
-    # LLM (Gemini)
-    "google-generativeai>=0.8.0",
+    # LLM (Ollama)
+    "ollama>=0.4.0",
 
     # Anki (AnkiConnect HTTP calls)
     "requests>=2.31.0",
