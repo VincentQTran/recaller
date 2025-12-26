@@ -410,16 +410,16 @@ def sync(
     if processed_notes:
         console.print("\n[bold]Step 6:[/bold] Archiving processed notes...")
 
-        #[TODO: Archive notes commented to keep notes in current]
-        # archive_ids = [note.notion_page_id for note in processed_notes]
-        # archive_results = notion.archive_notes(archive_ids)
+        # [TODO: Archive notes commented to keep notes in current]
+        archive_ids = [note.notion_page_id for note in processed_notes]
+        archive_results = notion.archive_notes(archive_ids)
 
-        # archived_count = sum(1 for success in archive_results.values() if success)
-        # failed_archive = len(archive_results) - archived_count
+        archived_count = sum(1 for success in archive_results.values() if success)
+        failed_archive = len(archive_results) - archived_count
 
-        # console.print(f"  Archived: [green]{archived_count}[/green] note(s)")
-        # if failed_archive > 0:
-        #     console.print(f"  Failed to archive: [red]{failed_archive}[/red] note(s)")
+        console.print(f"  Archived: [green]{archived_count}[/green] note(s)")
+        if failed_archive > 0:
+            console.print(f"  Failed to archive: [red]{failed_archive}[/red] note(s)")
     else:
         console.print("\n[bold]Step 6:[/bold] No notes to archive.\n")
 
