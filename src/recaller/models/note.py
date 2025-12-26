@@ -38,6 +38,7 @@ class Note:
     status: NoteStatus = NoteStatus.NEW
     embedding: Optional[np.ndarray] = None
     content_hash: Optional[str] = None
+    flashcard: bool = True  # Whether to generate flashcards for this note
 
     # Merge tracking
     merge_group_id: Optional[int] = None  # FK to parent note if merged

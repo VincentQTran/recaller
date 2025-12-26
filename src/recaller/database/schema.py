@@ -65,6 +65,7 @@ class NoteRecord(Base):
         Integer, ForeignKey("notes.id"), nullable=True
     )
     is_merge_parent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    flashcard: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # Relationships
     flashcards: Mapped[list["FlashcardRecord"]] = relationship(

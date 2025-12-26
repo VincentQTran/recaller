@@ -78,6 +78,11 @@ class FlashcardGenerator:
             if note.id is None:
                 continue
 
+            # Skip notes that have flashcard generation disabled
+            if not note.flashcard:
+                results[note.id] = []
+                continue
+
             try:
                 flashcards = self.generate_flashcards(note)
                 results[note.id] = flashcards

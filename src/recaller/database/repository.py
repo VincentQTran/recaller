@@ -49,6 +49,7 @@ class Repository:
                 embedding=self._serialize_embedding(note.embedding),
                 merge_group_id=note.merge_group_id,
                 is_merge_parent=note.is_merge_parent,
+                flashcard=note.flashcard,
             )
             session.add(record)
             session.commit()
@@ -105,6 +106,7 @@ class Repository:
                 record.embedding = self._serialize_embedding(note.embedding)
                 record.merge_group_id = note.merge_group_id
                 record.is_merge_parent = note.is_merge_parent
+                record.flashcard = note.flashcard
                 record.updated_at = datetime.utcnow()
                 session.commit()
                 note.content_hash = record.content_hash
@@ -421,6 +423,7 @@ class Repository:
             embedding=self._deserialize_embedding(record.embedding),
             merge_group_id=record.merge_group_id,
             is_merge_parent=record.is_merge_parent,
+            flashcard=record.flashcard,
         )
 
     def _record_to_flashcard(self, record: FlashcardRecord) -> Flashcard:

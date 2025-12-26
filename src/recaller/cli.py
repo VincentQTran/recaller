@@ -370,6 +370,13 @@ def sync(
             status.update(
                 f"[yellow]Generating flashcards for note {i}/{len(notes)}...[/yellow]"
             )
+
+            # Skip notes with flashcard generation disabled
+            if not note.flashcard:
+                console.print(f"  [dim]⊘[/dim] {note.title}: skipped (flashcard disabled)")
+                processed_notes.append(note)
+                continue
+
             try:
                 flashcards = flashcard_gen.generate_flashcards(note)
                 all_flashcards.extend(flashcards)
@@ -667,6 +674,7 @@ def test_notion(
             console.print(f"  [bold]Title:[/bold] {note.title}")
             console.print(f"  [bold]Category:[/bold] {note.category or '(none)'}")
             console.print(f"  [bold]Source:[/bold] {note.source or '(none)'}")
+            console.print(f"  [bold]Flashcard:[/bold] {'enabled' if note.flashcard else '[red]disabled[/red]'}")
             console.print(f"  [bold]Notion ID:[/bold] {note.notion_page_id}")
             if note.notion_last_edited:
                 console.print(f"  [bold]Last Edited:[/bold] {note.notion_last_edited}")
