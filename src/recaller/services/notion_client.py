@@ -1077,16 +1077,16 @@ class NotionService:
             return None
 
     def _is_metadata_block(self, block: dict[str, Any]) -> bool:
-        """Check if a block contains metadata flags.
+        """Check if a block contains metadata flags that should be filtered.
 
-        Looks for patterns like "Category:", "Source:", or "Flashcard:" at the
-        start of paragraph text.
+        Looks for patterns like "Category:" or "Flashcard:" at the start of paragraph text.
+        Note: "Source:" is NOT filtered - it's kept with the content.
 
         Args:
             block (dict[str, Any]): Notion block object
 
         Returns:
-            bool: True if the block is a metadata block
+            bool: True if the block is a metadata block that should be filtered
         """
         block_type = block.get("type")
 
@@ -1102,7 +1102,8 @@ class NotionService:
         text = "".join(t.get("plain_text", "") for t in rich_text).strip()
 
         # Check for metadata patterns (case-insensitive)
-        metadata_patterns = [r"^category\s*:", r"^source\s*:", r"^flashcard\s*:"]
+        # Note: "source" is intentionally excluded - we keep it with the content
+        metadata_patterns = [r"^category\s*:", r"^flashcard\s*:"]
         for pattern in metadata_patterns:
             if re.match(pattern, text, re.IGNORECASE):
                 return True
