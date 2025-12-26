@@ -437,6 +437,95 @@ class NotionService:
             print(f"Failed to add note to database: {e}")
             return None
 
+    def add_merged_note_to_database(
+        self, note: Note, source_page_ids: list[str]
+    ) -> Optional[str]:
+        """Add a merged note to the Notes Database, copying content from multiple sources.
+
+        Args:
+            note (Note): The merged note to add
+            source_page_ids (list[str]): List of Notion page IDs to copy content from
+
+        Returns:
+            Optional[str]: Page ID of created database entry, or None if failed
+        """
+        data_source_id = self.get_data_source_id()
+
+        try:
+            # Build properties
+            properties: dict[str, Any] = {
+                "Title": {"title": [{"text": {"content": note.title}}]},
+                "Date Imported": {"date": {"start": datetime.now().isoformat()}},
+            }
+
+            if note.category:
+                properties["Category"] = {"select": {"name": note.category}}
+
+            if note.source:
+                properties["Source"] = {"rich_text": [{"text": {"content": note.source}}]}
+
+            # Create the database page using data_source_id
+            payload = {
+                "parent": {"type": "data_source_id", "data_source_id": data_source_id},
+                "properties": properties,
+            }
+            response = self._post("/pages", payload)
+
+            new_page_id = response["id"]
+
+            # Collect all blocks from all source pages first
+            all_children: list[dict[str, Any]] = []
+
+            for i, source_page_id in enumerate(source_page_ids):
+                blocks = self._get_all_children(source_page_id)
+                if blocks:
+                    # Filter out metadata blocks from the beginning
+                    blocks = self._filter_metadata_blocks(blocks)
+                    if blocks:
+                        # Add divider between merged notes (except before the first one)
+                        if i > 0 and all_children:
+                            all_children.append({"type": "divider", "divider": {}})
+
+                        # Convert blocks - limit nesting to 2 levels (Notion API limitation)
+                        for block in blocks:
+                            converted = self._convert_block_for_copy(block)
+                            if converted:
+                                # Handle nested children (level 1)
+                                if block.get("has_children"):
+                                    nested_blocks = self._get_all_children(block["id"])
+                                    nested_children = []
+                                    for nested_block in nested_blocks:
+                                        nested_converted = self._convert_block_for_copy(nested_block)
+                                        if nested_converted:
+                                            # Handle level 2 children (max depth for API)
+                                            if nested_block.get("has_children"):
+                                                level2_blocks = self._get_all_children(nested_block["id"])
+                                                level2_children = []
+                                                for level2_block in level2_blocks:
+                                                    level2_converted = self._convert_block_for_copy(level2_block)
+                                                    if level2_converted:
+                                                        # Don't include deeper children - API limit
+                                                        level2_children.append(level2_converted)
+                                                if level2_children:
+                                                    nested_type = nested_converted["type"]
+                                                    nested_converted[nested_type]["children"] = level2_children
+                                            nested_children.append(nested_converted)
+                                    if nested_children:
+                                        block_type = converted["type"]
+                                        converted[block_type]["children"] = nested_children
+                                all_children.append(converted)
+
+            # Copy all blocks in batches
+            if all_children:
+                for i in range(0, len(all_children), 100):
+                    batch = all_children[i : i + 100]
+                    self._patch(f"/blocks/{new_page_id}/children", {"children": batch})
+
+            return new_page_id
+        except NotionAPIError as e:
+            print(f"Failed to add merged note to database: {e}")
+            return None
+
     def add_notes_to_database(self, notes: list[Note]) -> dict[str, Optional[str]]:
         """Add multiple notes to the Notes Database.
 
@@ -451,7 +540,9 @@ class NotionService:
             results[note.notion_page_id] = self.add_note_to_database(note)
         return results
 
-    def append_to_database_page(self, database_page_id: str, note: Note) -> bool:
+    def append_to_database_page(
+        self, database_page_id: str, note: Note, source_page_ids: Optional[list[str]] = None
+    ) -> bool:
         """Append content from a note to an existing database page.
 
         Adds a divider and the note's content blocks to the end of the existing page.
@@ -459,27 +550,71 @@ class NotionService:
         Args:
             database_page_id (str): ID of the existing database page
             note (Note): Note whose content will be appended
+            source_page_ids (Optional[list[str]]): For merged notes, list of all source page IDs
 
         Returns:
             bool: True if successful, False otherwise
         """
         try:
-            # Fetch content blocks from the source note
-            if not note.notion_page_id:
+            # Determine source pages to copy from
+            if source_page_ids:
+                pages_to_copy = source_page_ids
+            elif note.notion_page_id:
+                pages_to_copy = [note.notion_page_id]
+            else:
                 return False
 
-            blocks = self._get_all_children(note.notion_page_id)
-            if not blocks:
+            # Collect all blocks from source pages
+            all_children: list[dict[str, Any]] = []
+
+            for i, source_page_id in enumerate(pages_to_copy):
+                blocks = self._get_all_children(source_page_id)
+                if blocks:
+                    blocks = self._filter_metadata_blocks(blocks)
+                    if blocks:
+                        # Add divider between sources (except before first)
+                        if i > 0 and all_children:
+                            all_children.append({"type": "divider", "divider": {}})
+
+                        # Convert blocks with 2-level nesting limit
+                        for block in blocks:
+                            converted = self._convert_block_for_copy(block)
+                            if converted:
+                                if block.get("has_children"):
+                                    nested_blocks = self._get_all_children(block["id"])
+                                    nested_children = []
+                                    for nested_block in nested_blocks:
+                                        nested_converted = self._convert_block_for_copy(nested_block)
+                                        if nested_converted:
+                                            if nested_block.get("has_children"):
+                                                level2_blocks = self._get_all_children(nested_block["id"])
+                                                level2_children = []
+                                                for level2_block in level2_blocks:
+                                                    level2_converted = self._convert_block_for_copy(level2_block)
+                                                    if level2_converted:
+                                                        level2_children.append(level2_converted)
+                                                if level2_children:
+                                                    nested_type = nested_converted["type"]
+                                                    nested_converted[nested_type]["children"] = level2_children
+                                            nested_children.append(nested_converted)
+                                    if nested_children:
+                                        block_type = converted["type"]
+                                        converted[block_type]["children"] = nested_children
+                                all_children.append(converted)
+
+            if not all_children:
                 return True  # Nothing to append
 
-            # Add a divider first
+            # Add a divider before the appended content
             self._patch(
                 f"/blocks/{database_page_id}/children",
                 {"children": [{"type": "divider", "divider": {}}]},
             )
 
-            # Copy content blocks
-            self._copy_blocks_to_page(database_page_id, blocks)
+            # Copy all blocks in batches
+            for i in range(0, len(all_children), 100):
+                batch = all_children[i : i + 100]
+                self._patch(f"/blocks/{database_page_id}/children", {"children": batch})
 
             return True
         except NotionAPIError as e:
@@ -689,6 +824,48 @@ class NotionService:
 
         return converted
 
+    def _sanitize_rich_text(self, rich_text: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Sanitize rich_text by filtering out or fixing problematic elements.
+
+        Mentions can cause issues when copied if they have incomplete data.
+
+        Args:
+            rich_text (list[dict[str, Any]]): Original rich_text array
+
+        Returns:
+            list[dict[str, Any]]: Sanitized rich_text array
+        """
+        sanitized = []
+        for item in rich_text:
+            item_type = item.get("type")
+
+            if item_type == "mention":
+                mention = item.get("mention", {})
+                mention_type = mention.get("type")
+
+                # Only keep mentions with valid, complete data
+                if mention_type == "date" and mention.get("date"):
+                    sanitized.append(item)
+                elif mention_type == "page" and mention.get("page", {}).get("id"):
+                    sanitized.append(item)
+                elif mention_type == "database" and mention.get("database", {}).get("id"):
+                    sanitized.append(item)
+                elif mention_type == "user" and mention.get("user", {}).get("id"):
+                    sanitized.append(item)
+                else:
+                    # Convert invalid mention to plain text
+                    plain_text = item.get("plain_text", "")
+                    if plain_text:
+                        sanitized.append({
+                            "type": "text",
+                            "text": {"content": plain_text}
+                        })
+            else:
+                # Keep non-mention items as-is
+                sanitized.append(item)
+
+        return sanitized
+
     def _convert_block_for_copy(self, block: dict[str, Any]) -> Optional[dict[str, Any]]:
         """Convert a block to the format needed for creating a copy.
 
@@ -703,50 +880,51 @@ class NotionService:
             return None
 
         block_data = block.get(block_type, {})
+        rich_text = self._sanitize_rich_text(block_data.get("rich_text", []))
 
         # Handle different block types
         if block_type == "paragraph":
-            return {"type": "paragraph", "paragraph": {"rich_text": block_data.get("rich_text", [])}}
+            return {"type": "paragraph", "paragraph": {"rich_text": rich_text}}
         elif block_type == "heading_1":
-            return {"type": "heading_1", "heading_1": {"rich_text": block_data.get("rich_text", [])}}
+            return {"type": "heading_1", "heading_1": {"rich_text": rich_text}}
         elif block_type == "heading_2":
-            return {"type": "heading_2", "heading_2": {"rich_text": block_data.get("rich_text", [])}}
+            return {"type": "heading_2", "heading_2": {"rich_text": rich_text}}
         elif block_type == "heading_3":
-            return {"type": "heading_3", "heading_3": {"rich_text": block_data.get("rich_text", [])}}
+            return {"type": "heading_3", "heading_3": {"rich_text": rich_text}}
         elif block_type == "bulleted_list_item":
             return {
                 "type": "bulleted_list_item",
-                "bulleted_list_item": {"rich_text": block_data.get("rich_text", [])},
+                "bulleted_list_item": {"rich_text": rich_text},
             }
         elif block_type == "numbered_list_item":
             return {
                 "type": "numbered_list_item",
-                "numbered_list_item": {"rich_text": block_data.get("rich_text", [])},
+                "numbered_list_item": {"rich_text": rich_text},
             }
         elif block_type == "to_do":
             return {
                 "type": "to_do",
                 "to_do": {
-                    "rich_text": block_data.get("rich_text", []),
+                    "rich_text": rich_text,
                     "checked": block_data.get("checked", False),
                 },
             }
         elif block_type == "toggle":
-            return {"type": "toggle", "toggle": {"rich_text": block_data.get("rich_text", [])}}
+            return {"type": "toggle", "toggle": {"rich_text": rich_text}}
         elif block_type == "code":
             return {
                 "type": "code",
                 "code": {
-                    "rich_text": block_data.get("rich_text", []),
+                    "rich_text": rich_text,
                     "language": block_data.get("language", "plain text"),
                 },
             }
         elif block_type == "quote":
-            return {"type": "quote", "quote": {"rich_text": block_data.get("rich_text", [])}}
+            return {"type": "quote", "quote": {"rich_text": rich_text}}
         elif block_type == "callout":
             result: dict[str, Any] = {
                 "type": "callout",
-                "callout": {"rich_text": block_data.get("rich_text", [])},
+                "callout": {"rich_text": rich_text},
             }
             if block_data.get("icon"):
                 result["callout"]["icon"] = block_data["icon"]
@@ -878,6 +1056,10 @@ class NotionService:
             if not source:
                 source = self._extract_metadata_from_content(content, "source")
 
+            # Check for flashcard skip flag - if any value is set, disable flashcards
+            flashcard_value = self._extract_metadata_from_content(content, "flashcard")
+            flashcard_enabled = flashcard_value is None  # Disabled if any value is set
+
             return Note(
                 notion_page_id=page_id,
                 title=title,
@@ -886,6 +1068,7 @@ class NotionService:
                 content=content,
                 notion_last_edited=last_edited,
                 status=NoteStatus.NEW,
+                flashcard=flashcard_enabled,
             )
 
         except NotionAPIError:

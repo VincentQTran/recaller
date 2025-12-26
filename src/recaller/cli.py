@@ -87,88 +87,39 @@ def sync(
 
     console.print(f"  Generated embeddings for [green]{len(notes)}[/green] notes\n")
 
-    # Step 3: Find similar notes (including database notes)
-    console.print("[bold]Step 3:[/bold] Finding similar notes...")
+    # Step 3: Find similar notes among current notes
+    console.print("[bold]Step 3:[/bold] Finding similar notes among current notes...")
     from recaller.services.similarity_engine import SimilarityEngine
 
     # Initialize repository for cached embeddings
     repo = get_repository(settings)
 
-    # Fetch existing notes from database for comparison
-    console.print("  Fetching existing notes from database...")
-    database_notes = notion.fetch_database_notes()
-    console.print(f"  Found [cyan]{len(database_notes)}[/cyan] notes in database")
-
-    # Load cached embeddings for database notes (instead of regenerating)
-    if database_notes:
-        notion_ids = [n.notion_page_id for n in database_notes]
-        cached_embeddings = repo.get_embeddings_by_notion_ids(notion_ids)
-
-        cached_count = 0
-        generated_count = 0
-
-        with console.status("[yellow]Loading embeddings for database notes...[/yellow]"):
-            for db_note in database_notes:
-                if db_note.notion_page_id in cached_embeddings:
-                    # Use cached embedding
-                    _, db_note.embedding = cached_embeddings[db_note.notion_page_id]
-                    cached_count += 1
-                else:
-                    # Generate embedding for notes not in cache
-                    db_note.embedding = embedding_service.generate_note_embedding(db_note)
-                    generated_count += 1
-
-        console.print(f"  Embeddings: [green]{cached_count}[/green] cached, [yellow]{generated_count}[/yellow] generated")
-
     similarity_engine = SimilarityEngine(threshold=settings.similarity_threshold)
 
-    # Find similar pairs among current notes
+    # Find similar pairs among current notes only (database check happens after merging)
     similar_pairs = similarity_engine.find_similar_pairs(
         notes, same_category_only=True
     )
 
-    # Find similar pairs between current notes and database notes
-    database_similar_pairs = []
-    if database_notes:
-        database_similar_pairs = similarity_engine.find_similar_pairs_between(
-            notes, database_notes, same_category_only=True
-        )
-
-    if not similar_pairs and not database_similar_pairs:
-        console.print("  [green]No similar notes found[/green]\n")
+    if not similar_pairs:
+        console.print("  [green]No similar notes found among current notes[/green]\n")
     else:
-        if similar_pairs:
-            console.print(
-                f"  Found [yellow]{len(similar_pairs)}[/yellow] similar pairs among current notes"
-            )
-        if database_similar_pairs:
-            console.print(
-                f"  Found [yellow]{len(database_similar_pairs)}[/yellow] similar pairs with database notes"
-            )
+        console.print(
+            f"  Found [yellow]{len(similar_pairs)}[/yellow] similar pairs among current notes"
+        )
         console.print()
 
         # Display similar pairs among current notes
-        if similar_pairs:
-            console.print("[bold]Proposed merges (current notes):[/bold]")
-            for i, pair in enumerate(similar_pairs, 1):
-                console.print(f"\n[cyan]─── Pair {i} ───[/cyan]")
-                console.print(f"  [bold]Note A:[/bold] {pair.note_a.title}")
-                console.print(f"  [bold]Note B:[/bold] {pair.note_b.title}")
-                console.print(f"  [bold]Category:[/bold] {pair.note_a.category}")
-                console.print(f"  [bold]Similarity:[/bold] {pair.similarity:.2%}")
-
-        # Display similar pairs with database
-        if database_similar_pairs:
-            console.print("\n[bold]Proposed merges (with database):[/bold]")
-            for i, pair in enumerate(database_similar_pairs, 1):
-                console.print(f"\n[cyan]─── Database Pair {i} ───[/cyan]")
-                console.print(f"  [bold]New Note:[/bold] {pair.note_a.title}")
-                console.print(f"  [bold]Database Note:[/bold] {pair.note_b.title}")
-                console.print(f"  [bold]Category:[/bold] {pair.note_a.category}")
-                console.print(f"  [bold]Similarity:[/bold] {pair.similarity:.2%}")
+        console.print("[bold]Proposed merges (current notes):[/bold]")
+        for i, pair in enumerate(similar_pairs, 1):
+            console.print(f"\n[cyan]─── Pair {i} ───[/cyan]")
+            console.print(f"  [bold]Note A:[/bold] {pair.note_a.title}")
+            console.print(f"  [bold]Note B:[/bold] {pair.note_b.title}")
+            console.print(f"  [bold]Category:[/bold] {pair.note_a.category}")
+            console.print(f"  [bold]Similarity:[/bold] {pair.similarity:.2%}")
 
     if dry_run:
-        console.print("\n[yellow]Dry run complete. No changes were made.[/yellow]")
+        console.print("\n[yellow]Dry run complete (current notes only). Run without --dry-run to see database comparisons.[/yellow]")
         raise typer.Exit(0)
 
     # Initialize Ollama service for merge and flashcard generation
@@ -198,6 +149,7 @@ def sync(
 
     merged_page_ids: set[str] = set()  # Track notes that were merged into others
     database_merged_ids: set[str] = set()  # Track notes merged into database
+    merged_source_ids: dict[str, list[str]] = {}  # Map merged note ID to source page IDs
 
     # 4a: Handle merges among current notes
     if similar_pairs:
@@ -268,6 +220,10 @@ def sync(
 
         if merged_notes:
             for result in merged_notes:
+                # Track source page IDs for merged notes (for copying content later)
+                source_ids = [n.notion_page_id for n in result.original_notes]
+                merged_source_ids[result.merged_note.notion_page_id] = source_ids
+
                 for original in result.original_notes[1:]:
                     merged_page_ids.add(original.notion_page_id)
                 for i, note in enumerate(notes):
@@ -277,15 +233,67 @@ def sync(
 
             notes = [n for n in notes if n.notion_page_id not in merged_page_ids]
 
-    # 4b: Handle merges with database notes
+            # Regenerate embeddings for merged notes
+            console.print("  Regenerating embeddings for merged notes...")
+            for result in merged_notes:
+                result.merged_note.embedding = embedding_service.generate_note_embedding(
+                    result.merged_note
+                )
+
+    # 4b: Find and handle merges with database notes
+    console.print("\n[bold]Step 4b:[/bold] Checking for similar notes in database...")
+
+    # Fetch existing notes from database for comparison
+    console.print("  Fetching existing notes from database...")
+    database_notes = notion.fetch_database_notes()
+    console.print(f"  Found [cyan]{len(database_notes)}[/cyan] notes in database")
+
+    # Load cached embeddings for database notes (instead of regenerating)
+    if database_notes:
+        notion_ids = [n.notion_page_id for n in database_notes]
+        cached_embeddings = repo.get_embeddings_by_notion_ids(notion_ids)
+
+        cached_count = 0
+        generated_count = 0
+
+        with console.status("[yellow]Loading embeddings for database notes...[/yellow]"):
+            for db_note in database_notes:
+                if db_note.notion_page_id in cached_embeddings:
+                    # Use cached embedding
+                    _, db_note.embedding = cached_embeddings[db_note.notion_page_id]
+                    cached_count += 1
+                else:
+                    # Generate embedding for notes not in cache
+                    db_note.embedding = embedding_service.generate_note_embedding(db_note)
+                    generated_count += 1
+
+        console.print(f"  Embeddings: [green]{cached_count}[/green] cached, [yellow]{generated_count}[/yellow] generated")
+
+    # Find similar pairs between current notes (post-merge) and database notes
+    database_similar_pairs = []
+    if database_notes:
+        database_similar_pairs = similarity_engine.find_similar_pairs_between(
+            notes, database_notes, same_category_only=True
+        )
+
     if database_similar_pairs:
-        console.print("\n[bold]Step 4b:[/bold] Merging with existing database notes...")
+        console.print(
+            f"  Found [yellow]{len(database_similar_pairs)}[/yellow] similar pairs with database notes"
+        )
+        console.print()
+
+        # Display similar pairs with database
+        console.print("[bold]Proposed merges (with database):[/bold]")
+        for i, pair in enumerate(database_similar_pairs, 1):
+            console.print(f"\n[cyan]─── Database Pair {i} ───[/cyan]")
+            console.print(f"  [bold]New Note:[/bold] {pair.note_a.title}")
+            console.print(f"  [bold]Database Note:[/bold] {pair.note_b.title}")
+            console.print(f"  [bold]Category:[/bold] {pair.note_a.category}")
+            console.print(f"  [bold]Similarity:[/bold] {pair.similarity:.2%}")
+
+        console.print()
 
         for i, pair in enumerate(database_similar_pairs, 1):
-            # Skip if the current note was already merged
-            if pair.note_a.notion_page_id in merged_page_ids:
-                continue
-
             console.print(f"\n[bold cyan]═══ Database Merge {i}/{len(database_similar_pairs)} ═══[/bold cyan]")
             console.print(f"  [bold]New note:[/bold] {pair.note_a.title}")
             console.print(f"  [bold]Existing database note:[/bold] {pair.note_b.title}")
@@ -306,12 +314,18 @@ def sync(
                 continue
 
             # Append to existing database page
-            success = notion.append_to_database_page(pair.note_b.notion_page_id, pair.note_a)
+            # For merged notes, pass all source page IDs
+            source_ids = merged_source_ids.get(pair.note_a.notion_page_id)
+            success = notion.append_to_database_page(
+                pair.note_b.notion_page_id, pair.note_a, source_ids
+            )
             if success:
                 console.print(f"[green]✓ Appended to:[/green] {pair.note_b.title}")
                 database_merged_ids.add(pair.note_a.notion_page_id)
             else:
                 console.print(f"[red]Failed to append. Will add as new entry.[/red]")
+    else:
+        console.print("  [green]No similar notes found in database[/green]")
 
     # 4c: Add remaining notes to database
     notes_to_add = [n for n in notes if n.notion_page_id not in database_merged_ids]
@@ -323,24 +337,29 @@ def sync(
         failed_count = 0
         embeddings_stored = 0
 
-        with console.status("[yellow]Adding notes to database...[/yellow]"):
-            for note in notes_to_add:
+        for note in notes_to_add:
+            # Check if this is a merged note
+            if note.notion_page_id in merged_source_ids:
+                source_ids = merged_source_ids[note.notion_page_id]
+                result = notion.add_merged_note_to_database(note, source_ids)
+            else:
                 result = notion.add_note_to_database(note)
-                if result:
-                    added_count += 1
-                    console.print(f"  [green]✓[/green] {note.title}")
 
-                    # Store embedding locally (using new database page ID)
-                    if note.embedding is not None:
-                        repo.upsert_embedding(
-                            notion_page_id=result,  # new database page ID
-                            title=note.title,
-                            embedding=note.embedding,
-                        )
-                        embeddings_stored += 1
-                else:
-                    failed_count += 1
-                    console.print(f"  [red]✗[/red] {note.title}")
+            if result:
+                added_count += 1
+                console.print(f"  [green]✓[/green] {note.title}")
+
+                # Store embedding locally (using new database page ID)
+                if note.embedding is not None:
+                    repo.upsert_embedding(
+                        notion_page_id=result,  # new database page ID
+                        title=note.title,
+                        embedding=note.embedding,
+                    )
+                    embeddings_stored += 1
+            else:
+                failed_count += 1
+                console.print(f"  [red]✗[/red] {note.title}")
 
         console.print(f"\n[bold]Database summary:[/bold]")
         console.print(f"  Added: [green]{added_count}[/green]")

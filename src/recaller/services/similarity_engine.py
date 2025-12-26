@@ -90,11 +90,11 @@ class SimilarityEngine:
             for note_b in notes_with_embeddings[i + 1 :]:
                 # Skip if categories don't match (when same_category_only is True)
                 if same_category_only:
-                    # Both must have a category and they must match
-                    if not note_a.category or not note_b.category:
-                        continue
-                    if note_a.category.lower() != note_b.category.lower():
-                        continue
+                    # If both have categories, they must match
+                    # If one or both don't have categories, allow comparison
+                    if note_a.category and note_b.category:
+                        if note_a.category.lower() != note_b.category.lower():
+                            continue
 
                 # Skip if this pair should be excluded
                 if note_a.id and note_b.id:
@@ -154,10 +154,11 @@ class SimilarityEngine:
 
                 # Skip if categories don't match (when same_category_only is True)
                 if same_category_only:
-                    if not note_a.category or not note_b.category:
-                        continue
-                    if note_a.category.lower() != note_b.category.lower():
-                        continue
+                    # If both have categories, they must match
+                    # If one or both don't have categories, allow comparison
+                    if note_a.category and note_b.category:
+                        if note_a.category.lower() != note_b.category.lower():
+                            continue
 
                 # Compute similarity
                 similarity = self.cosine_similarity(
