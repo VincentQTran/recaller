@@ -423,11 +423,14 @@ class NotionService:
 
             new_page_id = response["id"]
 
-            # Copy content blocks from original note
+            # Copy content blocks from original note (excluding metadata blocks)
             if note.notion_page_id:
                 blocks = self._get_all_children(note.notion_page_id)
                 if blocks:
-                    self._copy_blocks_to_page(new_page_id, blocks)
+                    # Filter out metadata blocks from the beginning
+                    blocks = self._filter_metadata_blocks(blocks)
+                    if blocks:
+                        self._copy_blocks_to_page(new_page_id, blocks)
 
             return new_page_id
         except NotionAPIError as e:
@@ -889,6 +892,76 @@ class NotionService:
             raise
         except Exception:
             return None
+
+    def _is_metadata_block(self, block: dict[str, Any]) -> bool:
+        """Check if a block contains metadata flags.
+
+        Looks for patterns like "Category:", "Source:", or "Flashcard:" at the
+        start of paragraph text.
+
+        Args:
+            block (dict[str, Any]): Notion block object
+
+        Returns:
+            bool: True if the block is a metadata block
+        """
+        block_type = block.get("type")
+
+        # Only check paragraph blocks
+        if block_type != "paragraph":
+            return False
+
+        # Get the text content
+        rich_text = block.get("paragraph", {}).get("rich_text", [])
+        if not rich_text:
+            return False
+
+        text = "".join(t.get("plain_text", "") for t in rich_text).strip()
+
+        # Check for metadata patterns (case-insensitive)
+        metadata_patterns = [r"^category\s*:", r"^source\s*:", r"^flashcard\s*:"]
+        for pattern in metadata_patterns:
+            if re.match(pattern, text, re.IGNORECASE):
+                return True
+
+        return False
+
+    def _filter_metadata_blocks(self, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Filter out metadata blocks from the beginning of a block list.
+
+        Only checks and removes metadata blocks from the first few blocks,
+        since metadata is expected at the start of the note.
+
+        Args:
+            blocks (list[dict[str, Any]]): List of Notion block objects
+
+        Returns:
+            list[dict[str, Any]]: Filtered list with leading metadata blocks removed
+        """
+        # Only check the first 5 blocks for metadata
+        max_check = min(5, len(blocks))
+        first_content_idx = 0
+
+        for i in range(max_check):
+            block = blocks[i]
+            block_type = block.get("type")
+
+            # Skip empty paragraphs at the start
+            if block_type == "paragraph":
+                rich_text = block.get("paragraph", {}).get("rich_text", [])
+                text = "".join(t.get("plain_text", "") for t in rich_text).strip()
+                if not text:
+                    first_content_idx = i + 1
+                    continue
+
+            # Check if it's a metadata block
+            if self._is_metadata_block(block):
+                first_content_idx = i + 1
+            else:
+                # Stop at first non-metadata, non-empty block
+                break
+
+        return blocks[first_content_idx:]
 
     def _extract_metadata_from_content(self, content: str, field: str) -> Optional[str]:
         """Extract metadata (category/source) from content text.
