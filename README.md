@@ -124,6 +124,9 @@ recaller sync
 # Preview without making changes
 recaller sync --dry-run
 
+# Sync without archiving processed notes
+recaller sync --no-archive
+
 # Show database statistics
 recaller status
 
@@ -159,7 +162,8 @@ When you run `recaller sync`:
 3. **Deduplicate**: Finds similar notes (above threshold) and prompts you to merge them
 4. **Store**: Adds notes to the Notion "Notes Database" for long-term storage
 5. **Generate**: Creates 1-3 flashcards per note using the configured LLM
-6. **Export**: Sends flashcards to Anki via AnkiConnect
+6. **Archive**: Moves processed notes from "Current" to "Archive" (skip with `--no-archive`)
+7. **Export**: Sends flashcards to Anki via AnkiConnect
 
 Notes with `Flashcard: skip` are processed through steps 1-4 but skipped for flashcard generation.
 

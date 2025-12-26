@@ -28,6 +28,9 @@ def sync(
     dry_run: bool = typer.Option(
         False, "--dry-run", "-n", help="Preview changes without modifying anything"
     ),
+    no_archive: bool = typer.Option(
+        False, "--no-archive", help="Skip archiving notes after processing"
+    ),
 ):
     """
     Sync notes from Notion and generate flashcards.
@@ -407,10 +410,11 @@ def sync(
             console.print(f"\n[dim]... and {len(all_flashcards) - 5} more flashcard(s)[/dim]")
 
     # Step 6: Archive processed notes
-    if processed_notes:
+    if no_archive:
+        console.print("\n[bold]Step 6:[/bold] Skipping archiving (--no-archive flag set)")
+    elif processed_notes:
         console.print("\n[bold]Step 6:[/bold] Archiving processed notes...")
 
-        # [TODO: Archive notes commented to keep notes in current]
         archive_ids = [note.notion_page_id for note in processed_notes]
         archive_results = notion.archive_notes(archive_ids)
 
