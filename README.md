@@ -1,6 +1,6 @@
 # Recaller
 
-A CLI tool that syncs notes from Notion to Anki with semantic deduplication and AI-generated flashcards.
+A CLI tool to assist in note-taking and studying using Notion and Anki. Recaller compiles Notion notes into a Notion database and automatically generate flashcards for Anki.
 
 ## How It Works
 
