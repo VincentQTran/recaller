@@ -1,5 +1,6 @@
 """Merge engine for combining similar notes."""
 
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -229,7 +230,9 @@ class MergeEngine:
     def _merge_sources(self, notes: list[Note]) -> str:
         """Merge sources from multiple notes.
 
-        Combines unique sources with comma separation.
+        Combines unique sources with comma separation. Handles notes that
+        already have multiple comma-separated sources by splitting and
+        deduplicating individual sources. Normalizes markdown links to plain URLs.
 
         Args:
             notes: List of notes to merge
@@ -242,12 +245,40 @@ class MergeEngine:
 
         for note in notes:
             if note.source and note.source.strip():
-                source = note.source.strip()
-                if source.lower() not in seen:
-                    seen.add(source.lower())
-                    sources.append(source)
+                # Split on comma to handle notes with multiple sources
+                for source in note.source.split(","):
+                    source = source.strip()
+                    if not source:
+                        continue
+
+                    # Normalize: extract URL from markdown link format [text](url)
+                    normalized = self._normalize_source(source)
+
+                    if normalized.lower() not in seen:
+                        seen.add(normalized.lower())
+                        sources.append(normalized)
 
         return ", ".join(sources) if sources else ""
+
+    def _normalize_source(self, source: str) -> str:
+        """Normalize a source string by extracting URL from markdown links.
+
+        Handles formats like:
+        - [text](url) -> url
+        - [url](url) -> url
+        - plain url -> url
+
+        Args:
+            source: The source string to normalize
+
+        Returns:
+            Normalized source (plain URL if it was a markdown link)
+        """
+        # Match markdown link pattern [text](url)
+        match = re.match(r"\[.*?\]\((.*?)\)", source)
+        if match:
+            return match.group(1).strip()
+        return source
 
     def preview_merge(self, proposal: MergeProposal) -> dict[str, Any]:
         """Generate a preview of what the merge would produce.
