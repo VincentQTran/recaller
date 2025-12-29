@@ -432,9 +432,11 @@ def sync(
         # - processed_notes: notes that went through flashcard generation
         # - merged_page_ids: secondary notes merged into other current notes
         # - database_merged_ids: notes merged into existing database notes
-        archive_ids = [note.notion_page_id for note in processed_notes]
-        archive_ids.extend(merged_page_ids)
-        archive_ids.extend(database_merged_ids)
+        # Use a set to deduplicate (merged notes are already in processed_notes)
+        archive_id_set: set[str] = {note.notion_page_id for note in processed_notes}
+        archive_id_set.update(merged_page_ids)
+        archive_id_set.update(database_merged_ids)
+        archive_ids = list(archive_id_set)
 
         if archive_ids:
             console.print("\n[bold]Step 6:[/bold] Archiving processed notes...")
