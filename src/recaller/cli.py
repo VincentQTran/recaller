@@ -87,8 +87,82 @@ def sync(
 
     console.print(f"  Generated embeddings for [green]{len(notes)}[/green] notes\n")
 
-    # Step 3: Find similar notes among current notes
-    console.print("[bold]Step 3:[/bold] Finding similar notes among current notes...")
+    # Initialize Ollama service for flashcard generation and merging
+    from recaller.services.ollama_service import OllamaService
+
+    ollama = OllamaService(
+        model_name=settings.ollama_model,
+        host=settings.ollama_host,
+        api_key=settings.ollama_api_key or None,
+    )
+
+    # Check Ollama connection
+    if not ollama.check_connection():
+        console.print(
+            f"[red]Cannot connect to Ollama at {settings.ollama_host}. "
+            "Check your API key and connection.[/red]"
+        )
+        raise typer.Exit(1)
+    console.print(f"  [green]✓[/green] Connected to Ollama ({settings.ollama_model})\n")
+
+    # Step 3: Generate flashcards (before merging, from original notes)
+    console.print("[bold]Step 3:[/bold] Generating flashcards...")
+
+    from recaller.services.flashcard_generator import FlashcardGenerator
+
+    flashcard_gen = FlashcardGenerator(
+        ollama_service=ollama,
+        cards_per_note_min=settings.cards_per_note_min,
+        cards_per_note_max=settings.cards_per_note_max,
+    )
+
+    all_flashcards: list = []
+    failed_notes = 0
+    processed_notes: list = []  # Track successfully processed notes for archiving
+
+    with console.status("[yellow]Generating flashcards...[/yellow]") as status:
+        for i, note in enumerate(notes, 1):
+            status.update(
+                f"[yellow]Generating flashcards for note {i}/{len(notes)}...[/yellow]"
+            )
+
+            # Skip notes with flashcard generation disabled
+            if not note.flashcard:
+                console.print(f"  [dim]⊘[/dim] {note.title}: skipped (flashcard disabled)")
+                processed_notes.append(note)
+                continue
+
+            try:
+                flashcards = flashcard_gen.generate_flashcards(note)
+                all_flashcards.extend(flashcards)
+                processed_notes.append(note)
+                console.print(
+                    f"  [green]✓[/green] {note.title}: {len(flashcards)} card(s)"
+                )
+            except Exception as e:
+                console.print(f"  [red]✗[/red] {note.title}: {e}")
+                failed_notes += 1
+
+    console.print("\n[bold]Flashcard summary:[/bold]")
+    console.print(f"  Generated: [green]{len(all_flashcards)}[/green] flashcard(s)")
+    console.print(f"  Failed notes: [yellow]{failed_notes}[/yellow]")
+
+    if all_flashcards:
+        # Preview generated flashcards
+        console.print("\n[bold]Preview of generated flashcards:[/bold]")
+        for i, card in enumerate(all_flashcards[:5], 1):
+            console.print(f"\n[cyan]─── Card {i} ───[/cyan]")
+            front_preview = card.front[:100] + "..." if len(card.front) > 100 else card.front
+            back_preview = card.back[:100] + "..." if len(card.back) > 100 else card.back
+            console.print(f"  [bold]Q:[/bold] {front_preview}")
+            console.print(f"  [bold]A:[/bold] {back_preview}")
+            console.print(f"  [dim]Tags: {', '.join(card.tags)}[/dim]")
+
+        if len(all_flashcards) > 5:
+            console.print(f"\n[dim]... and {len(all_flashcards) - 5} more flashcard(s)[/dim]")
+
+    # Step 4: Find similar notes among current notes
+    console.print("\n[bold]Step 4:[/bold] Finding similar notes among current notes...")
     from recaller.services.similarity_engine import SimilarityEngine
 
     # Initialize repository for cached embeddings
@@ -119,29 +193,11 @@ def sync(
             console.print(f"  [bold]Similarity:[/bold] {pair.similarity:.2%}")
 
     if dry_run:
-        console.print("\n[yellow]Dry run complete (current notes only). Run without --dry-run to see database comparisons.[/yellow]")
+        console.print("\n[yellow]Dry run complete. Flashcards generated but merging/database skipped.[/yellow]")
         raise typer.Exit(0)
 
-    # Initialize Ollama service for merge and flashcard generation
-    from recaller.services.ollama_service import OllamaService
-
-    ollama = OllamaService(
-        model_name=settings.ollama_model,
-        host=settings.ollama_host,
-        api_key=settings.ollama_api_key or None,
-    )
-
-    # Check Ollama connection
-    if not ollama.check_connection():
-        console.print(
-            f"[red]Cannot connect to Ollama at {settings.ollama_host}. "
-            "Check your API key and connection.[/red]"
-        )
-        raise typer.Exit(1)
-    console.print(f"  [green]✓[/green] Connected to Ollama ({settings.ollama_model})\n")
-
-    # Step 4: Merge and add to database
-    console.print("[bold]Step 4:[/bold] Merge and add notes to database...")
+    # Step 5: Merge and add to database
+    console.print("\n[bold]Step 5:[/bold] Merge and add notes to database...")
 
     from recaller.services.merge_engine import MergeEngine
 
@@ -151,9 +207,9 @@ def sync(
     database_merged_ids: set[str] = set()  # Track notes merged into database
     merged_source_ids: dict[str, list[str]] = {}  # Map merged note ID to source page IDs
 
-    # 4a: Handle merges among current notes
+    # 5a: Handle merges among current notes
     if similar_pairs:
-        console.print("\n[bold]Step 4a:[/bold] Merging similar current notes...")
+        console.print("\n[bold]Step 5a:[/bold] Merging similar current notes...")
 
         proposals = merge_engine.create_proposals_from_pairs(similar_pairs)
         console.print(f"  Created [cyan]{len(proposals)}[/cyan] merge proposal(s)\n")
@@ -240,8 +296,8 @@ def sync(
                     result.merged_note
                 )
 
-    # 4b: Find and handle merges with database notes
-    console.print("\n[bold]Step 4b:[/bold] Checking for similar notes in database...")
+    # 5b: Find and handle merges with database notes
+    console.print("\n[bold]Step 5b:[/bold] Checking for similar notes in database...")
 
     # Fetch existing notes from database for comparison
     console.print("  Fetching existing notes from database...")
@@ -327,11 +383,11 @@ def sync(
     else:
         console.print("  [green]No similar notes found in database[/green]")
 
-    # 4c: Add remaining notes to database
+    # 5c: Add remaining notes to database
     notes_to_add = [n for n in notes if n.notion_page_id not in database_merged_ids]
 
     if notes_to_add:
-        console.print(f"\n[bold]Step 4c:[/bold] Adding {len(notes_to_add)} notes to database...")
+        console.print(f"\n[bold]Step 5c:[/bold] Adding {len(notes_to_add)} notes to database...")
 
         added_count = 0
         failed_count = 0
@@ -367,66 +423,6 @@ def sync(
         console.print(f"  Merged with existing: [cyan]{len(database_merged_ids)}[/cyan]")
         if failed_count:
             console.print(f"  Failed: [red]{failed_count}[/red]")
-
-    # Update notes list to exclude database-merged notes
-    notes = [n for n in notes if n.notion_page_id not in database_merged_ids]
-    console.print(f"\n  [green]Notes to process for flashcards:[/green] {len(notes)}\n")
-
-    # Step 5: Generate flashcards
-    console.print("[bold]Step 5:[/bold] Generating flashcards...")
-
-    from recaller.services.flashcard_generator import FlashcardGenerator
-
-    flashcard_gen = FlashcardGenerator(
-        ollama_service=ollama,
-        cards_per_note_min=settings.cards_per_note_min,
-        cards_per_note_max=settings.cards_per_note_max,
-    )
-
-    all_flashcards: list = []
-    failed_notes = 0
-    processed_notes: list = []  # Track successfully processed notes for archiving
-
-    with console.status("[yellow]Generating flashcards...[/yellow]") as status:
-        for i, note in enumerate(notes, 1):
-            status.update(
-                f"[yellow]Generating flashcards for note {i}/{len(notes)}...[/yellow]"
-            )
-
-            # Skip notes with flashcard generation disabled
-            if not note.flashcard:
-                console.print(f"  [dim]⊘[/dim] {note.title}: skipped (flashcard disabled)")
-                processed_notes.append(note)
-                continue
-
-            try:
-                flashcards = flashcard_gen.generate_flashcards(note)
-                all_flashcards.extend(flashcards)
-                processed_notes.append(note)
-                console.print(
-                    f"  [green]✓[/green] {note.title}: {len(flashcards)} card(s)"
-                )
-            except Exception as e:
-                console.print(f"  [red]✗[/red] {note.title}: {e}")
-                failed_notes += 1
-
-    console.print("\n[bold]Flashcard summary:[/bold]")
-    console.print(f"  Generated: [green]{len(all_flashcards)}[/green] flashcard(s)")
-    console.print(f"  Failed notes: [yellow]{failed_notes}[/yellow]")
-
-    if all_flashcards:
-        # Preview generated flashcards
-        console.print("\n[bold]Preview of generated flashcards:[/bold]")
-        for i, card in enumerate(all_flashcards[:5], 1):
-            console.print(f"\n[cyan]─── Card {i} ───[/cyan]")
-            front_preview = card.front[:100] + "..." if len(card.front) > 100 else card.front
-            back_preview = card.back[:100] + "..." if len(card.back) > 100 else card.back
-            console.print(f"  [bold]Q:[/bold] {front_preview}")
-            console.print(f"  [bold]A:[/bold] {back_preview}")
-            console.print(f"  [dim]Tags: {', '.join(card.tags)}[/dim]")
-
-        if len(all_flashcards) > 5:
-            console.print(f"\n[dim]... and {len(all_flashcards) - 5} more flashcard(s)[/dim]")
 
     # Step 6: Archive processed notes
     if no_archive:
