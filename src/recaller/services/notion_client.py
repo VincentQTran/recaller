@@ -766,7 +766,7 @@ class NotionService:
             return False
 
     def _copy_blocks_to_page(self, page_id: str, blocks: list[dict[str, Any]]) -> None:
-        """Copy blocks to a page, including nested children.
+        """Copy blocks to a page, with nesting limited to 2 levels (Notion API limit).
 
         Args:
             page_id (str): Target page ID
@@ -776,16 +776,25 @@ class NotionService:
         for block in blocks:
             converted = self._convert_block_for_copy(block)
             if converted:
-                # Handle nested children for blocks that support them
+                # Handle nested children (level 1)
                 if block.get("has_children"):
                     nested_blocks = self._get_all_children(block["id"])
                     nested_children = []
                     for nested_block in nested_blocks:
                         nested_converted = self._convert_block_for_copy(nested_block)
                         if nested_converted:
-                            # Recursively handle deeply nested children
+                            # Handle level 2 children (max depth for Notion API)
                             if nested_block.get("has_children"):
-                                nested_converted = self._convert_block_with_children(nested_block)
+                                level2_blocks = self._get_all_children(nested_block["id"])
+                                level2_children = []
+                                for level2_block in level2_blocks:
+                                    level2_converted = self._convert_block_for_copy(level2_block)
+                                    if level2_converted:
+                                        # Don't include deeper children - API limit
+                                        level2_children.append(level2_converted)
+                                if level2_children:
+                                    nested_type = nested_converted["type"]
+                                    nested_converted[nested_type]["children"] = level2_children
                             nested_children.append(nested_converted)
                     if nested_children:
                         block_type = converted["type"]
@@ -852,8 +861,17 @@ class NotionService:
                     sanitized.append(item)
                 elif mention_type == "user" and mention.get("user", {}).get("id"):
                     sanitized.append(item)
+                elif mention_type == "link_preview":
+                    # link_preview mentions can't be created, convert to text with link
+                    url = mention.get("link_preview", {}).get("url", "")
+                    plain_text = item.get("plain_text", url)
+                    if plain_text:
+                        sanitized.append({
+                            "type": "text",
+                            "text": {"content": plain_text, "link": {"url": url} if url else None}
+                        })
                 else:
-                    # Convert invalid mention to plain text
+                    # Convert invalid/unsupported mention to plain text
                     plain_text = item.get("plain_text", "")
                     if plain_text:
                         sanitized.append({
@@ -933,6 +951,18 @@ class NotionService:
             return {"type": "divider", "divider": {}}
         elif block_type == "bookmark":
             return {"type": "bookmark", "bookmark": {"url": block_data.get("url", "")}}
+        elif block_type == "link_preview":
+            # link_preview blocks can't be created via API, convert to bookmark
+            url = block_data.get("url", "")
+            if url:
+                return {"type": "bookmark", "bookmark": {"url": url}}
+            return None
+        elif block_type == "embed":
+            # embed blocks - convert to bookmark if URL is available
+            url = block_data.get("url", "")
+            if url:
+                return {"type": "bookmark", "bookmark": {"url": url}}
+            return None
         elif block_type == "image":
             # Get the image URL (external or Notion-hosted file)
             image_type = block_data.get("type")
