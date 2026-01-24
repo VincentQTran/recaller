@@ -168,6 +168,11 @@ def sync(
     # Initialize repository for cached embeddings
     repo = get_repository(settings)
 
+    # Save flashcards to database with PENDING status for later export
+    if all_flashcards:
+        repo.add_flashcards(all_flashcards)
+        console.print(f"  [green]✓[/green] Saved {len(all_flashcards)} flashcard(s) to database")
+
     similarity_engine = SimilarityEngine(threshold=settings.similarity_threshold)
 
     # Find similar pairs among current notes only (database check happens after merging)
@@ -496,8 +501,16 @@ def sync(
                     for err in errors:
                         console.print(f"    [dim]- {err.error}[/dim]")
 
-                # Offer to sync with AnkiWeb
+                # Update export status in database for successfully exported flashcards
                 if exported > 0:
+                    from recaller.models.flashcard import ExportStatus
+                    for result in results:
+                        if result.success and result.flashcard.id:
+                            repo.update_flashcard_export(
+                                result.flashcard.id,
+                                ExportStatus.EXPORTED,
+                                anki_note_id=result.anki_note_id,
+                            )
                     console.print("\n[green]✓ Flashcards exported successfully![/green]")
 
             except AnkiConnectError as e:
@@ -593,7 +606,15 @@ def export():
         if failed > 0:
             console.print(f"  Failed: [red]{failed}[/red] flashcard(s)")
 
+        # Update export status in database for successfully exported flashcards
         if exported > 0:
+            for result in results:
+                if result.success and result.flashcard.id:
+                    repo.update_flashcard_export(
+                        result.flashcard.id,
+                        ExportStatus.EXPORTED,
+                        anki_note_id=result.anki_note_id,
+                    )
             console.print("\n[green]✓ Export complete![/green]")
 
     except AnkiConnectError as e:
